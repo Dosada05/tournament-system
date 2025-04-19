@@ -9,15 +9,37 @@ import (
 	"strconv"
 )
 
+// Регистрация
 func SignUp(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
-	var user models.User
-	if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
+	var err error
+	if r.Method != http.MethodPost {
+		http.Error(w, err.Error(), http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Структура для получения данных из тела запроса
+	type SignUpRequest struct {
+		FirstName string `json:"first_name"`
+		LastName  string `json:"last_name"`
+		Email     string `json:"email"`
+		Password  string `json:"password"`
+	}
+
+	var req SignUpRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	if err := services.CreateUser(&user); err != nil {
+	// Создание пользователя на основе полученных данных
+	user := models.User{
+		FirstName: req.FirstName,
+		LastName:  req.LastName,
+		Email:     req.Email,
+	}
+
+	if err := services.CreateUser(&user, req.Password); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -26,21 +48,30 @@ func SignUp(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(user)
 }
 
+// Авторизация
 func SignIn(w http.ResponseWriter, r *http.Request) {
 	defer r.Body.Close()
+
 	var credentials models.Credentials
 	if err := json.NewDecoder(r.Body).Decode(&credentials); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		http.Error(w, "Неверный формат запроса", http.StatusBadRequest)
+		return
+	}
+
+	// Проверка на обязательные поля
+	if credentials.Email == "" || credentials.Password == "" {
+		http.Error(w, "Email и пароль обязательны", http.StatusBadRequest)
 		return
 	}
 
 	token, err := services.AuthenticateUser(credentials)
 	if err != nil {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		http.Error(w, "Неверные учетные данные", http.StatusUnauthorized)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"token": token})
 }
 

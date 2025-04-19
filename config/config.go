@@ -9,8 +9,7 @@ import (
 )
 
 var (
-	DB        *sql.DB
-	JWTSecret string
+	DB *sql.DB
 )
 
 func LoadConfig() {
@@ -26,8 +25,4 @@ func LoadConfig() {
 		log.Fatal("Failed to connect to database:", err)
 	}
 
-	JWTSecret = os.Getenv("JWT_SECRET")
-	if JWTSecret == "" {
-		log.Fatal("JWT_SECRET environment variable is required")
-	}
 }

@@ -20,3 +20,7 @@ func UpdateTournament(id int, tournament *models.Tournament) error {
 func DeleteTournament(id int) error {
 	return repositories.DeleteTournament(id)
 }
+
+func GetAllTournaments(limit, offset int) ([]models.Tournament, error) {
+	return repositories.GetAllTournaments(limit, offset)
+}
