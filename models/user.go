@@ -4,12 +4,12 @@ import "time"
 
 type User struct {
 	ID           int       `json:"id"`
-	FirstName    string    `json:"first_name"`
-	LastName     string    `json:"last_name"`
-	Nickname     string    `json:"nickname"`
-	TeamID       int       `json:"team_id,omitempty"`
+	FirstName    string    `json:"first_name" validate:"required"`
+	LastName     string    `json:"last_name" validate:"required"`
+	Nickname     *string   `json:"nickname,omitempty"`
+	TeamID       *int      `json:"team_id,omitempty"`
 	Role         string    `json:"role"`
-	Email        string    `json:"email"`
+	Email        string    `json:"email" validate:"required,email"`
 	PasswordHash string    `json:"-"`
 	CreatedAt    time.Time `json:"created_at"`
 }

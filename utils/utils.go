@@ -1,14 +1,31 @@
 package utils
 
 import (
+	"os"
+	"time"
+
 	"github.com/Dosada05/tournament-system/models"
 	"github.com/dgrijalva/jwt-go"
 	"golang.org/x/crypto/bcrypt"
-	"time"
 )
 
+const BcryptCost = 14
+
+var jwtSecret = []byte(getEnvOrDefault("JWT_SECRET", "TSSSSS"))
+
+func GetJWTSecret() []byte {
+	return jwtSecret
+}
+
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
+}
+
 func HashPassword(password string) (string, error) {
-	bytes, err := bcrypt.GenerateFromPassword([]byte(password), 14)
+	bytes, err := bcrypt.GenerateFromPassword([]byte(password), BcryptCost)
 	return string(bytes), err
 }
 
@@ -18,16 +35,14 @@ func CheckPasswordHash(password, hash string) bool {
 }
 
 func GenerateJWT(user *models.User) (string, error) {
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"id":    user.ID,
-		"email": user.Email,
-		"exp":   time.Now().Add(time.Hour * 72).Unix(),
-	})
-
-	tokenString, err := token.SignedString([]byte("your_secret_key"))
-	if err != nil {
-		return "", err
+	now := time.Now()
+	claims := jwt.MapClaims{
+		"id":   user.ID,
+		"role": user.Role,
+		"exp":  now.Add(time.Hour * 24).Unix(),
 	}
 
-	return tokenString, nil
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	return token.SignedString(jwtSecret)
 }

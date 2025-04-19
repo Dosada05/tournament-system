@@ -6,9 +6,9 @@ import (
 )
 
 func RegisterParticipant(participant *models.Participant) error {
-	query := `INSERT INTO participants (user_id, team_id, tournament_id, status, created_at)
+	query := `INSERT INTO participants (user_id, team_id, tournament_id, status)
               VALUES ($1, $2, $3, $4, $5)`
-	_, err := config.DB.Exec(query, participant.UserID, participant.TeamID, participant.TournamentID, participant.Status, participant.CreatedAt)
+	_, err := config.DB.Exec(query, participant.UserID, participant.TeamID, participant.TournamentID, participant.Status)
 	return err
 }
 

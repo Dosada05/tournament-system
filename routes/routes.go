@@ -16,36 +16,20 @@ func InitRoutes() *chi.Mux {
 	router.Post("/users/signup", controllers.SignUp)
 	router.Post("/users/signin", controllers.SignIn)
 
-	// Protected Routes
-	router.Group(func(r chi.Router) {
-		r.Use(middleware.Authenticate)
+	router.Route("/tournaments", func(r chi.Router) {
+		// Публичные маршруты для просмотра турниров
+		r.Get("/", controllers.GetAllTournaments)
+		r.Get("/{id}", controllers.GetTournament)
 
-		// User Routes
-		r.Get("/users/{id}", controllers.GetUser)
-		r.Put("/users/{id}", controllers.UpdateUser)
-		r.Delete("/users/{id}", controllers.DeleteUser)
+		// Защищенные маршруты только для организаторов
+		r.Group(func(r chi.Router) {
+			r.Use(middleware.Authenticate)
+			r.Use(middleware.Authorize("organizer"))
 
-		// Team Routes
-		r.With(middleware.Authorize("admin")).Post("/teams", controllers.CreateTeam)
-		r.Get("/teams/{id}", controllers.GetTeam)
-		r.With(middleware.Authorize("admin")).Put("/teams/{id}", controllers.UpdateTeam)
-		r.With(middleware.Authorize("admin")).Delete("/teams/{id}", controllers.DeleteTeam)
-
-		// Tournament Routes
-		r.With(middleware.Authorize("admin")).Post("/tournaments", controllers.CreateTournament)
-		r.Get("/tournaments/{id}", controllers.GetTournament)
-		r.With(middleware.Authorize("admin")).Put("/tournaments/{id}", controllers.UpdateTournament)
-		r.With(middleware.Authorize("admin")).Delete("/tournaments/{id}", controllers.DeleteTournament)
-
-		// Participant Routes
-		r.Post("/registrations", controllers.RegisterParticipant)
-		r.Get("/registrations/{tournamentId}", controllers.GetParticipants)
-
-		// Match Routes
-		r.With(middleware.Authorize("admin")).Post("/matches", controllers.CreateMatch)
-		r.Get("/matches/{id}", controllers.GetMatch)
-		r.With(middleware.Authorize("admin")).Put("/matches/{id}", controllers.UpdateMatch)
-		r.With(middleware.Authorize("admin")).Delete("/matches/{id}", controllers.DeleteMatch)
+			r.Post("/", controllers.CreateTournament)
+			r.Put("/{id}", controllers.UpdateTournament)
+			r.Delete("/{id}", controllers.DeleteTournament)
+		})
 	})
 
 	return router
