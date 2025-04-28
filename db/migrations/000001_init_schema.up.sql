@@ -1,3 +1,16 @@
+-- Таблица спорта
+CREATE TABLE sports (
+                        id SERIAL PRIMARY KEY,
+                        name VARCHAR(50) NOT NULL UNIQUE
+);
+
+-- Таблица форматов
+CREATE TABLE formats (
+                         id SERIAL PRIMARY KEY,
+                         name VARCHAR(50) UNIQUE NOT NULL
+);
+
+-- Таблица пользователей (без ограничения для team_id)
 CREATE TABLE users (
                        id SERIAL PRIMARY KEY,
                        first_name VARCHAR(50) NOT NULL,
@@ -10,28 +23,21 @@ CREATE TABLE users (
                        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Таблица команд
 CREATE TABLE teams (
                        id SERIAL PRIMARY KEY,
                        name VARCHAR(100) NOT NULL UNIQUE,
-                       captain_id INT NOT NULL
+                       sport_id INT NOT NULL,
+                       captain_id INT NOT NULL,
+                       FOREIGN KEY (sport_id) REFERENCES sports (id),
+                       FOREIGN KEY (captain_id) REFERENCES users (id)
 );
 
+-- Добавление ограничения для team_id в таблице users
 ALTER TABLE users
     ADD CONSTRAINT fk_users_team FOREIGN KEY (team_id) REFERENCES teams (id);
 
-ALTER TABLE teams
-    ADD CONSTRAINT fk_teams_captain FOREIGN KEY (captain_id) REFERENCES users (id);
-
-CREATE TABLE sports (
-                        id SERIAL PRIMARY KEY,
-                        name VARCHAR(50) NOT NULL UNIQUE
-);
-
-CREATE TABLE formats (
-                         id SERIAL PRIMARY KEY,
-                         name VARCHAR(50) UNIQUE NOT NULL
-);
-
+-- Тип статуса турнира и таблица турниров
 CREATE TYPE tournament_status AS ENUM ('soon', 'registration', 'active', 'completed', 'canceled');
 
 CREATE TABLE tournaments (
@@ -52,6 +58,7 @@ CREATE TABLE tournaments (
                              FOREIGN KEY (sport_id) REFERENCES sports (id)
 );
 
+-- Тип статуса участника и таблица участников
 CREATE TYPE participant_status AS ENUM ('application_submitted', 'application_rejected', 'participant');
 
 CREATE TABLE participants (
@@ -69,6 +76,7 @@ CREATE TABLE participants (
                               UNIQUE (team_id, tournament_id)
 );
 
+-- Тип статуса матча и таблицы матчей
 CREATE TYPE match_status AS ENUM ('scheduled', 'in_progress', 'completed', 'canceled');
 
 CREATE TABLE solo_matches (
