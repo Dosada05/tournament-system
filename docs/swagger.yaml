@@ -1,0 +1,180 @@
+definitions:
+  models.Team:
+    properties:
+      captain_id:
+        type: integer
+      id:
+        type: integer
+      name:
+        type: string
+      sport_id:
+        type: integer
+    type: object
+host: localhost:8080
+info:
+  contact: {}
+  description: Это API для управления спортивными турнирами.
+  title: Турнирная система API
+paths:
+  /teams/:
+    get:
+      description: Возвращает список всех команд
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            items:
+              $ref: '#/definitions/models.Team'
+            type: array
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Получить все команды
+      tags:
+      - teams
+    post:
+      consumes:
+      - application/json
+      description: Создаёт новую команду
+      parameters:
+      - description: Данные команды
+        in: body
+        name: team
+        required: true
+        schema:
+          $ref: '#/definitions/models.Team'
+      produces:
+      - application/json
+      responses:
+        "201":
+          description: Created
+          schema:
+            $ref: '#/definitions/models.Team'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - ApiKeyAuth: []
+      summary: Создать команду
+      tags:
+      - teams
+  /teams/{id}:
+    delete:
+      description: Удаляет команду по id
+      parameters:
+      - description: ID команды
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - ApiKeyAuth: []
+      summary: Удалить команду
+      tags:
+      - teams
+    get:
+      description: Возвращает команду по её id
+      parameters:
+      - description: ID команды
+        in: path
+        name: id
+        required: true
+        type: integer
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Team'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "404":
+          description: Not Found
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      summary: Получить команду по id
+      tags:
+      - teams
+    put:
+      consumes:
+      - application/json
+      description: Обновляет данные команды
+      parameters:
+      - description: ID команды
+        in: path
+        name: id
+        required: true
+        type: integer
+      - description: Данные команды
+        in: body
+        name: team
+        required: true
+        schema:
+          $ref: '#/definitions/models.Team'
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/models.Team'
+        "400":
+          description: Bad Request
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+        "500":
+          description: Internal Server Error
+          schema:
+            additionalProperties:
+              type: string
+            type: object
+      security:
+      - ApiKeyAuth: []
+      summary: Обновить команду
+      tags:
+      - teams
+swagger: "2.0"

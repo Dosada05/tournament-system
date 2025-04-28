@@ -22,7 +22,6 @@ func init() {
 	tokenAuth = jwtauth.New("HS256", utils.GetJWTSecret(), nil)
 }
 
-// Authenticate проверяет JWT-токен и добавляет информацию о пользователе в контекст
 func Authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token, err := extractToken(r)
@@ -61,7 +60,6 @@ func Authenticate(next http.Handler) http.Handler {
 	})
 }
 
-// Authorize проверяет роль пользователя
 func Authorize(roles ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -77,7 +75,6 @@ func Authorize(roles ...string) func(http.Handler) http.Handler {
 				return
 			}
 
-			// Проверка наличия необходимой роли
 			authorized := false
 			for _, role := range roles {
 				if role == userRole {
@@ -96,7 +93,6 @@ func Authorize(roles ...string) func(http.Handler) http.Handler {
 	}
 }
 
-// extractToken извлекает токен из заголовка Authorization
 func extractToken(r *http.Request) (string, error) {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {

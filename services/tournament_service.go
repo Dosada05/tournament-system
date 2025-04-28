@@ -5,22 +5,30 @@ import (
 	"github.com/Dosada05/tournament-system/repositories"
 )
 
-func CreateTournament(tournament *models.Tournament) error {
-	return repositories.CreateTournament(tournament)
+type TournamentService struct {
+	repo repositories.TournamentRepository
 }
 
-func GetTournamentByID(id int) (*models.Tournament, error) {
-	return repositories.GetTournamentByID(id)
+func NewTournamentService(repo repositories.TournamentRepository) *TournamentService {
+	return &TournamentService{repo: repo}
 }
 
-func UpdateTournament(id int, tournament *models.Tournament) error {
-	return repositories.UpdateTournament(id, tournament)
+func (s *TournamentService) CreateTournament(tournament *models.Tournament) error {
+	return s.repo.Create(tournament)
 }
 
-func DeleteTournament(id int) error {
-	return repositories.DeleteTournament(id)
+func (s *TournamentService) GetTournamentByID(id int) (*models.Tournament, error) {
+	return s.repo.GetByID(id)
 }
 
-func GetAllTournaments(limit, offset int) ([]models.Tournament, error) {
-	return repositories.GetAllTournaments(limit, offset)
+func (s *TournamentService) UpdateTournament(id int, tournament *models.Tournament) error {
+	return s.repo.Update(id, tournament)
+}
+
+func (s *TournamentService) DeleteTournament(id int) error {
+	return s.repo.Delete(id)
+}
+
+func (s *TournamentService) GetAllTournaments(limit, offset int) ([]models.Tournament, error) {
+	return s.repo.GetAll(limit, offset)
 }

@@ -8,43 +8,47 @@ import (
 	"log"
 )
 
-func CreateUser(user *models.User, password string) error {
+type UserService struct {
+	repo repositories.UserRepository
+}
 
+func NewUserService(repo repositories.UserRepository) *UserService {
+	return &UserService{repo: repo}
+}
+
+// CreateUser создает пользователя с захешированным паролем.
+func (s *UserService) CreateUser(user *models.User, password string) error {
 	hashedPassword, err := utils.HashPassword(password)
 	if err != nil {
 		return err
 	}
 	user.PasswordHash = hashedPassword
 	user.Role = "player"
-	return repositories.CreateUser(user)
+	return s.repo.Create(user)
 }
 
-func AuthenticateUser(credentials models.Credentials) (string, error) {
-	// Проверка наличия обязательных полей
+// AuthenticateUser проверяет email/пароль и возвращает JWT.
+func (s *UserService) AuthenticateUser(credentials models.Credentials) (string, error) {
 	if credentials.Email == "" || credentials.Password == "" {
 		return "", errors.New("email и пароль обязательны")
 	}
 
-	// Получаем пользователя из БД
-	user, err := repositories.GetUserByEmail(credentials.Email)
+	user, err := s.repo.GetByEmail(credentials.Email)
 	if err != nil {
 		log.Printf("Ошибка при получении пользователя: %v", err)
 		return "", errors.New("неверные учетные данные")
 	}
 
-	// Проверяем, что user не nil
 	if user == nil {
 		log.Printf("Пользователь с email %s не найден", credentials.Email)
 		return "", errors.New("неверные учетные данные")
 	}
 
-	// Проверяем пароль
 	if !utils.CheckPasswordHash(credentials.Password, user.PasswordHash) {
 		log.Printf("Неверный пароль для пользователя %s", credentials.Email)
 		return "", errors.New("неверные учетные данные")
 	}
 
-	// Генерируем токен
 	token, err := utils.GenerateJWT(user)
 	if err != nil {
 		log.Printf("Ошибка создания JWT: %v", err)
@@ -54,14 +58,17 @@ func AuthenticateUser(credentials models.Credentials) (string, error) {
 	return token, nil
 }
 
-func GetUserByID(id int) (*models.User, error) {
-	return repositories.GetUserByID(id)
+// GetUserByID возвращает пользователя по ID.
+func (s *UserService) GetUserByID(id int) (*models.User, error) {
+	return s.repo.GetByID(id)
 }
 
-func UpdateUser(id int, user *models.User) error {
-	return repositories.UpdateUser(id, user)
+// UpdateUser обновляет данные пользователя.
+func (s *UserService) UpdateUser(id int, user *models.User) error {
+	return s.repo.Update(id, user)
 }
 
-func DeleteUser(id int) error {
-	return repositories.DeleteUser(id)
+// DeleteUser удаляет пользователя.
+func (s *UserService) DeleteUser(id int) error {
+	return s.repo.Delete(id)
 }
