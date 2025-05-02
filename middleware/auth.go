@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	bearerPrefix = "Bearer "
+	bearerPrefix = "Bearer"
 	userKey      = "user"
 )
 

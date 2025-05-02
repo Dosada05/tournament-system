@@ -1,6 +1,8 @@
 package utils
 
 import (
+	"context"
+	"errors"
 	"os"
 	"time"
 
@@ -10,6 +12,8 @@ import (
 )
 
 const BcryptCost = 14
+
+const userKey = "user"
 
 var jwtSecret = []byte(getEnvOrDefault("JWT_SECRET", "TSSSSS"))
 
@@ -45,4 +49,22 @@ func GenerateJWT(user *models.User) (string, error) {
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 
 	return token.SignedString(jwtSecret)
+}
+
+// GetUserIDFromContext достаёт user_id из JWT claims в контексте запроса
+func GetUserIDFromContext(ctx context.Context) (int, error) {
+	claims, ok := ctx.Value(userKey).(jwt.MapClaims)
+	if !ok {
+		return 0, errors.New("user claims not found in context")
+	}
+	idRaw, ok := claims["user_id"]
+	if !ok {
+		return 0, errors.New("user_id not found in token")
+	}
+
+	idFloat, ok := idRaw.(float64)
+	if !ok {
+		return 0, errors.New("user_id has invalid type")
+	}
+	return int(idFloat), nil
 }
