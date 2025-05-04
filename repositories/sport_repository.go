@@ -1,90 +1,163 @@
 package repositories
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 
 	"github.com/Dosada05/tournament-system/models"
+	"github.com/lib/pq"
+)
+
+var (
+	ErrSportNotFound     = errors.New("sport not found")
+	ErrSportNameConflict = errors.New("sport name conflict")
+	ErrSportInUse        = errors.New("sport cannot be deleted as it is in use") // Для ошибки FK при удалении
 )
 
 type SportRepository interface {
-	Create(sport *models.Sport) error
-	GetByID(id int) (*models.Sport, error)
-	GetAll() ([]models.Sport, error)
-	Update(id int, sport *models.Sport) error
-	Delete(id int) error
-	ExistsByName(name string) (bool, error)
+	Create(ctx context.Context, sport *models.Sport) error
+	GetByID(ctx context.Context, id int) (*models.Sport, error)
+	GetAll(ctx context.Context) ([]models.Sport, error)
+	Update(ctx context.Context, sport *models.Sport) error
+	Delete(ctx context.Context, id int) error
+	ExistsByName(ctx context.Context, name string) (bool, error)
 }
 
-type sportRepository struct {
+type postgresSportRepository struct {
 	db *sql.DB
 }
 
-func NewSportRepository(db *sql.DB) SportRepository {
-	return &sportRepository{db: db}
+func NewPostgresSportRepository(db *sql.DB) SportRepository {
+	return &postgresSportRepository{db: db}
 }
 
-func (r *sportRepository) Create(sport *models.Sport) error {
+func (r *postgresSportRepository) Create(ctx context.Context, sport *models.Sport) error {
 	query := `INSERT INTO sports (name) VALUES ($1) RETURNING id`
-	return r.db.QueryRow(query, sport.Name).Scan(&sport.ID)
+
+	err := r.db.QueryRowContext(ctx, query, sport.Name).Scan(&sport.ID)
+	if err != nil {
+		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
+			if pqErr.Constraint == "sports_name_key" {
+				return ErrSportNameConflict
+			}
+		}
+		return err
+	}
+	return nil
 }
 
-func (r *sportRepository) GetByID(id int) (*models.Sport, error) {
+func (r *postgresSportRepository) GetByID(ctx context.Context, id int) (*models.Sport, error) {
 	query := `SELECT id, name FROM sports WHERE id = $1`
-	row := r.db.QueryRow(query, id)
 
 	var sport models.Sport
-	if err := row.Scan(&sport.ID, &sport.Name); err != nil {
-		if err == sql.ErrNoRows {
-			return nil, nil
+	err := r.db.QueryRowContext(ctx, query, id).Scan(&sport.ID, &sport.Name)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrSportNotFound
 		}
 		return nil, err
 	}
-
 	return &sport, nil
 }
 
-func (r *sportRepository) GetAll() ([]models.Sport, error) {
-	query := `SELECT id, name FROM sports ORDER BY id`
-	rows, err := r.db.Query(query)
+func (r *postgresSportRepository) GetAll(ctx context.Context) ([]models.Sport, error) {
+	query := `SELECT id, name FROM sports ORDER BY name ASC` // Сортировка по имени
+
+	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	var sports []models.Sport
+	// Оптимальное создание слайса
+	sports := make([]models.Sport, 0)
+	estimatedCapacity := 10 // Можно задать ожидаемую емкость, если известно
+	if rows.Next() {        // Проверяем, есть ли хоть одна строка, перед созданием с capacity
+		sports = make([]models.Sport, 0, estimatedCapacity)
+		var sport models.Sport
+		if scanErr := rows.Scan(&sport.ID, &sport.Name); scanErr != nil {
+			return nil, scanErr
+		}
+		sports = append(sports, sport)
+	} else {
+		if err = rows.Err(); err != nil { // Проверка ошибки, даже если строк не было
+			return nil, err
+		}
+		return sports, nil // Возвращаем пустой слайс, если строк нет
+	}
+
+	// Продолжаем цикл для остальных строк
 	for rows.Next() {
 		var sport models.Sport
-		if err := rows.Scan(&sport.ID, &sport.Name); err != nil {
-			return nil, err
+		if scanErr := rows.Scan(&sport.ID, &sport.Name); scanErr != nil {
+			return nil, scanErr
 		}
 		sports = append(sports, sport)
 	}
-	return sports, rows.Err()
+
+	// Критически важная проверка ошибки после цикла
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return sports, nil
 }
 
-func (r *sportRepository) Update(id int, sport *models.Sport) error {
+func (r *postgresSportRepository) Update(ctx context.Context, sport *models.Sport) error {
 	query := `UPDATE sports SET name = $1 WHERE id = $2`
-	_, err := r.db.Exec(query, sport.Name, id)
-	return err
-}
 
-func (r *sportRepository) Delete(id int) error {
-	query := `DELETE FROM sports WHERE id = $1`
-	_, err := r.db.Exec(query, id)
-	return err
-}
-
-func (r *sportRepository) ExistsByName(name string) (bool, error) {
-	query := `SELECT id FROM sports WHERE name = $1`
-	row := r.db.QueryRow(query, name)
-
-	var id int
-	err := row.Scan(&id)
+	result, err := r.db.ExecContext(ctx, query, sport.Name, sport.ID)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return false, nil
+		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" { // unique_violation
+			if pqErr.Constraint == "sports_name_key" { // ЗАМЕНИТЕ на реальное имя constraint
+				return ErrSportNameConflict
+			}
 		}
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return ErrSportNotFound
+	}
+
+	return nil
+}
+
+func (r *postgresSportRepository) Delete(ctx context.Context, id int) error {
+	query := `DELETE FROM sports WHERE id = $1`
+
+	result, err := r.db.ExecContext(ctx, query, id)
+	if err != nil {
+		// Проверка на ошибку FK (т.к. у нас ON DELETE RESTRICT для teams и tournaments)
+		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23503" { // foreign_key_violation
+			return ErrSportInUse
+		}
+		return err
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return ErrSportNotFound
+	}
+
+	return nil
+}
+
+func (r *postgresSportRepository) ExistsByName(ctx context.Context, name string) (bool, error) {
+	query := `SELECT EXISTS (SELECT 1 FROM sports WHERE name = $1)`
+	var exists bool
+	err := r.db.QueryRowContext(ctx, query, name).Scan(&exists)
+	if err != nil {
+		// Ошибка sql.ErrNoRows здесь не ожидается
 		return false, err
 	}
-	return true, nil
+	return exists, nil
 }

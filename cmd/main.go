@@ -1,51 +1,137 @@
 package main
 
 import (
-	"github.com/Dosada05/tournament-system/config"
-	"github.com/Dosada05/tournament-system/controllers"
-	"github.com/Dosada05/tournament-system/repositories"
-	"github.com/Dosada05/tournament-system/routes"
-	"github.com/Dosada05/tournament-system/services"
-	"log"
+	"context"
+	"errors"
+	"fmt"
+	"github.com/Dosada05/tournament-system/db"
+	api "github.com/Dosada05/tournament-system/routes"
+	"log/slog"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/Dosada05/tournament-system/config"
+	_ "github.com/Dosada05/tournament-system/db"
+	"github.com/Dosada05/tournament-system/handlers"
+	"github.com/Dosada05/tournament-system/repositories"
+	"github.com/Dosada05/tournament-system/services"
+
+	"github.com/go-chi/chi/v5"
+	_ "github.com/lib/pq"
 )
 
 func main() {
-	// 1. Подключения к базе данных
-	db := config.InitDB()
-	defer db.Close()
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	// 2. Инициализация репозиториев (слой доступа к данным)
-	userRepo := repositories.NewUserRepository(db)
-	teamRepo := repositories.NewTeamRepository(db)
-	sportRepo := repositories.NewSportRepository(db)
-	tournamentRepo := repositories.NewTournamentRepository(db)
-	participantRepo := repositories.NewParticipantRepository(db)
+	cfg, err := config.Load()
+	if err != nil {
+		logger.Error("failed to load configuration", slog.Any("error", err))
+		os.Exit(1)
+	}
 
-	// 3. Инициализация сервисов (бизнес-логика)
+	logger.Info("configuration loaded", slog.Int("port", cfg.ServerPort))
+
+	db, err := db.Connect(cfg.DatabaseURL, 5*time.Second)
+	if err != nil {
+		logger.Error("failed to connect to database", slog.Any("error", err))
+		os.Exit(1)
+	}
+	defer func() {
+		if err := db.Close(); err != nil {
+			logger.Error("failed to close database connection", slog.Any("error", err))
+		} else {
+			logger.Info("database connection closed")
+		}
+	}()
+
+	logger.Info("database connection established")
+
+	userRepo := repositories.NewPostgresUserRepository(db)
+	teamRepo := repositories.NewPostgresTeamRepository(db)
+	sportRepo := repositories.NewPostgresSportRepository(db)
+	//formatRepo := repositories.NewPostgresFormatRepository(db)
+	//tournamentRepo := repositories.NewPostgresTournamentRepository(db)
+	//participantRepo := repositories.NewPostgresParticipantRepository(db)
+	inviteRepo := repositories.NewPostgresInviteRepository(db)
+
+	authService := services.NewAuthService(userRepo)
 	userService := services.NewUserService(userRepo)
-	teamService := services.NewTeamService(teamRepo, sportRepo)
 	sportService := services.NewSportService(sportRepo)
-	tournamentService := services.NewTournamentService(tournamentRepo)
-	participantService := services.NewParticipantService(participantRepo, userRepo, teamRepo, tournamentRepo)
+	//formatService := services.NewFormatService(formatRepo)
+	teamService := services.NewTeamService(teamRepo, userRepo, sportRepo)
+	inviteService := services.NewInviteService(inviteRepo, teamRepo, userRepo)
+	//participantService := services.NewParticipantService(participantRepo, tournamentRepo, userRepo, teamRepo)
+	//tournamentService := services.NewTournamentService(tournamentRepo, sportRepo, formatRepo, userRepo, participantService)
 
-	// 4. Инициализация контроллеров (HTTP-слой)
-	userController := controllers.NewUserController(userService)
-	teamController := controllers.NewTeamController(teamService)
-	sportController := controllers.NewSportController(sportService)
-	tournamentController := controllers.NewTournamentController(tournamentService)
-	participantController := controllers.NewParticipantController(participantService)
+	authHandler := handlers.NewAuthHandler(authService, cfg.JWTSecretKey)
+	userHandler := handlers.NewUserHandler(userService)
+	teamHandler := handlers.NewTeamHandler(teamService, userService)
+	sportHandler := handlers.NewSportHandler(sportService)
+	// formatHandler := handlers.NewFormatHandler(formatService)
+	// tournamentHandler := handlers.NewTournamentHandler(tournamentService)
+	// participantHandler := handlers.NewParticipantHandler(participantService, tournamentService)
+	inviteHandler := handlers.NewInviteHandler(inviteService)
+		
+	router := chi.NewRouter()
 
-	// 5. Настройка маршрутов с внедрением зависимостей
-	router := routes.InitRoutes(
-		userController,
-		teamController,
-		sportController,
-		tournamentController,
-		participantController,
+	api.SetupRoutes(
+		router,
+		authHandler,
+		userHandler,
+		teamHandler,
+		sportHandler,
+		inviteHandler,
+		// tournamentHandler,
+		// participantHandler,
 	)
 
-	// 6. Запуск HTTP-сервера
-	log.Println("Starting the server on :8080...")
-	log.Fatal(http.ListenAndServe(":8080", router))
+	server := &http.Server{
+		Addr:         fmt.Sprintf(":%d", cfg.ServerPort),
+		Handler:      router,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 10 * time.Second,
+		IdleTimeout:  120 * time.Second,
+		ErrorLog:     slog.NewLogLogger(logger.Handler(), slog.LevelError),
+	}
+
+	serverErrors := make(chan error, 1)
+
+	go func() {
+		logger.Info("starting server", slog.String("address", server.Addr))
+		serverErrors <- server.ListenAndServe()
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case err := <-serverErrors:
+		if !errors.Is(err, http.ErrServerClosed) {
+			logger.Error("server error", slog.Any("error", err))
+			os.Exit(1)
+		} else {
+			logger.Info("server stopped")
+		}
+	case sig := <-quit:
+		logger.Info("shutdown signal received", slog.String("signal", sig.String()))
+
+		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		logger.Info("shutting down server", slog.Duration("timeout", 15*time.Second))
+		if err := server.Shutdown(ctx); err != nil {
+			logger.Error("graceful shutdown failed", slog.Any("error", err))
+			if closeErr := server.Close(); closeErr != nil {
+				logger.Error("failed to force close server", slog.Any("error", closeErr))
+			}
+			os.Exit(1)
+		} else {
+			logger.Info("server shutdown complete")
+		}
+	}
+
+	logger.Info("server exited")
 }

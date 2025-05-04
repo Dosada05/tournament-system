@@ -2,19 +2,30 @@ package models
 
 import "time"
 
+type UserRole string
+
+const (
+	RoleAdmin     UserRole = "admin"
+	RoleOrganizer UserRole = "organizer"
+	RolePlayer    UserRole = "player"
+)
+
 type User struct {
-	ID           int       `json:"id"`
-	FirstName    string    `json:"first_name" validate:"required"`
-	LastName     string    `json:"last_name" validate:"required"`
-	Nickname     *string   `json:"nickname,omitempty"`
-	TeamID       *int      `json:"team_id,omitempty"`
-	Role         string    `json:"role"`
-	Email        string    `json:"email" validate:"required,email"`
-	PasswordHash string    `json:"-"`
-	CreatedAt    time.Time `json:"created_at"`
+	ID           int           `json:"id" db:"id"`
+	FirstName    string        `json:"first_name" db:"first_name"`
+	LastName     string        `json:"last_name" db:"last_name"`
+	Nickname     *string       `json:"nickname,omitempty" db:"nickname"`
+	TeamID       *int          `json:"team_id,omitempty" db:"team_id"`
+	Role         UserRole      `json:"role" db:"role"`
+	Email        string        `json:"email" db:"email"`
+	PasswordHash string        `json:"-" db:"password_hash"`
+	CreatedAt    time.Time     `json:"created_at" db:"created_at"`
+	Team         *Team         `json:"team,omitempty" db:"-"`
+	Participants []Participant `json:"participants,omitempty" db:"-"`
 }
 
+// Credentials используется для передачи данных аутентификации (логин/пароль).
 type Credentials struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
+	Email    string `json:"email" validate:"required,email"` // Валидация уместна в DTO
+	Password string `json:"password" validate:"required"`    // Валидация уместна в DTO
 }

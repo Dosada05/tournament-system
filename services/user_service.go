@@ -1,74 +1,128 @@
 package services
 
 import (
+	"context"
 	"errors"
+	"fmt"
+
 	"github.com/Dosada05/tournament-system/models"
 	"github.com/Dosada05/tournament-system/repositories"
-	"github.com/Dosada05/tournament-system/utils"
-	"log"
 )
 
-type UserService struct {
-	repo repositories.UserRepository
+var (
+	ErrUserUpdateFailed = errors.New("failed to update user profile")
+	ErrNicknameTaken    = errors.New("nickname is already taken")
+)
+
+type UserService interface {
+	GetProfileByID(ctx context.Context, userID int) (*models.User, error)
+	UpdateProfile(ctx context.Context, userID int, input UpdateProfileInput) (*models.User, error)
+	ListUsersByTeamID(ctx context.Context, teamID int) ([]models.User, error)
 }
 
-func NewUserService(repo repositories.UserRepository) *UserService {
-	return &UserService{repo: repo}
+type UpdateProfileInput struct {
+	FirstName *string
+	LastName  *string
+	Nickname  *string
 }
 
-// CreateUser создает пользователя с захешированным паролем.
-func (s *UserService) CreateUser(user *models.User, password string) error {
-	hashedPassword, err := utils.HashPassword(password)
+type userService struct {
+	userRepo repositories.UserRepository
+}
+
+func NewUserService(userRepo repositories.UserRepository) UserService {
+	return &userService{
+		userRepo: userRepo,
+	}
+}
+
+func (s *userService) GetProfileByID(ctx context.Context, userID int) (*models.User, error) {
+	user, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
-		return err
+		if errors.Is(err, repositories.ErrUserNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("failed to get user by id %d: %w", userID, err)
 	}
-	user.PasswordHash = hashedPassword
-	user.Role = "player"
-	return s.repo.Create(user)
+
+	user.PasswordHash = ""
+	return user, nil
 }
 
-// AuthenticateUser проверяет email/пароль и возвращает JWT.
-func (s *UserService) AuthenticateUser(credentials models.Credentials) (string, error) {
-	if credentials.Email == "" || credentials.Password == "" {
-		return "", errors.New("email и пароль обязательны")
-	}
-
-	user, err := s.repo.GetByEmail(credentials.Email)
+func (s *userService) UpdateProfile(ctx context.Context, userID int, input UpdateProfileInput) (*models.User, error) {
+	user, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
-		log.Printf("Ошибка при получении пользователя: %v", err)
-		return "", errors.New("неверные учетные данные")
+		if errors.Is(err, repositories.ErrUserNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("failed to get user for update %d: %w", userID, err)
 	}
 
-	if user == nil {
-		log.Printf("Пользователь с email %s не найден", credentials.Email)
-		return "", errors.New("неверные учетные данные")
+	updated := false
+	if input.FirstName != nil && *input.FirstName != user.FirstName {
+		user.FirstName = *input.FirstName
+		updated = true
+	}
+	if input.LastName != nil && *input.LastName != user.LastName {
+		user.LastName = *input.LastName
+		updated = true
+	}
+	if input.Nickname != nil {
+		currentNickname := ""
+		if user.Nickname != nil {
+			currentNickname = *user.Nickname
+		}
+		if *input.Nickname != currentNickname {
+			if *input.Nickname == "" {
+				user.Nickname = nil
+			} else {
+				newNickname := *input.Nickname
+				user.Nickname = &newNickname
+			}
+			updated = true
+		}
 	}
 
-	if !utils.CheckPasswordHash(credentials.Password, user.PasswordHash) {
-		log.Printf("Неверный пароль для пользователя %s", credentials.Email)
-		return "", errors.New("неверные учетные данные")
+	if !updated {
+		user.PasswordHash = ""
+		return user, nil
 	}
 
-	token, err := utils.GenerateJWT(user)
+	err = s.userRepo.Update(ctx, user)
 	if err != nil {
-		log.Printf("Ошибка создания JWT: %v", err)
-		return "", errors.New("ошибка создания токена")
+		if errors.Is(err, repositories.ErrUserNicknameConflict) { // <--- ТЕПЕРЬ ЭТО КОРРЕКТНО
+			return nil, ErrNicknameTaken
+		}
+		if errors.Is(err, repositories.ErrUserNotFound) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("%w: %w", ErrUserUpdateFailed, err)
 	}
 
-	return token, nil
+	user.PasswordHash = ""
+	return user, nil
 }
 
-// GetUserByID возвращает пользователя по ID.
-func (s *UserService) GetUserByID(id int) (*models.User, error) {
-	return s.repo.GetByID(id)
-}
+func (s *userService) ListUsersByTeamID(ctx context.Context, teamID int) ([]models.User, error) {
+	if teamID <= 0 {
+		return nil, errors.New("invalid team ID") // Базовая валидация ID
+	}
 
-// UpdateUser обновляет данные пользователя.
-func (s *UserService) UpdateUser(id int, user *models.User) error {
-	return s.repo.Update(id, user)
-}
+	users, err := s.userRepo.ListByTeamID(ctx, teamID)
+	if err != nil {
+		// В ListByTeamID репозитория обычно нет специфичных ошибок типа NotFound или Conflict,
+		// поэтому просто оборачиваем ошибку репозитория.
+		return nil, fmt.Errorf("failed to list users by team id from repository: %w", err)
+	}
 
-// DeleteUser удаляет пользователя.
-func (s *UserService) DeleteUser(id int) error {
-	return s.repo.Delete(id)
+	// Сервис не должен возвращать хеши паролей
+	for i := range users {
+		users[i].PasswordHash = ""
+		// Здесь НЕ нужно очищать users[i].Team, так как репозиторий ListByTeamID
+		// (согласно коду из предыдущего шага) не делает JOIN и не заполняет user.Team.
+		// Если бы он делал JOIN, то очистка была бы нужна здесь.
+	}
+
+	// Возвращаем пустой слайс, если команда пуста (не ошибку)
+	return users, nil
 }
