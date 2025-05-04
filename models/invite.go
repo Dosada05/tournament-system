@@ -8,6 +8,4 @@ type Invite struct {
 	Token     string    `json:"-" db:"token"`
 	ExpiresAt time.Time `json:"expires_at" db:"expires_at"`
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
-
-	Team *Team `json:"team,omitempty" db:"-"`
 }

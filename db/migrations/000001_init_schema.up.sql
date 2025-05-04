@@ -32,7 +32,6 @@ CREATE INDEX idx_teams_name ON teams (name);
 CREATE INDEX idx_teams_sport_id ON teams (sport_id);
 CREATE INDEX idx_teams_captain_id ON teams (captain_id);
 
--- Таблица пользователей
 CREATE TABLE users (
                        id SERIAL PRIMARY KEY,
                        first_name VARCHAR(50) NOT NULL,
@@ -45,8 +44,7 @@ CREATE TABLE users (
                        created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
--- Добавляем внешний ключ к teams после создания таблицы teams
-ALTER TABLE users ADD CONSTRAINT fk_users_team FOREIGN KEY (team_id) REFERENCES teams (id) ON DELETE SET NULL; -- При удалении команды у пользователя team_id станет NULL
+ALTER TABLE users ADD CONSTRAINT fk_users_team FOREIGN KEY (team_id) REFERENCES teams (id) ON DELETE SET NULL;
 CREATE INDEX idx_users_email ON users (email);
 CREATE INDEX idx_users_team_id ON users (team_id);
 CREATE INDEX idx_users_role ON users (role);

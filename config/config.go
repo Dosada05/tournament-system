@@ -8,34 +8,28 @@ import (
 	"github.com/joho/godotenv"
 )
 
-// Config хранит все конфигурационные параметры приложения.
 type Config struct {
 	DatabaseURL  string
 	JWTSecretKey string
 	ServerPort   int
 }
 
-// Load загружает конфигурацию из переменных окружения.
-// Опционально подгружает .env файл (полезно для локальной разработки).
 func Load() (*Config, error) {
-	// Загружаем .env файл, если он есть. Ошибку не считаем фатальной.
-	_ = godotenv.Load() // Можно добавить логирование, если файл не найден, но не падать
+	_ = godotenv.Load()
 
 	dbURL := os.Getenv("DATABASE_URL")
 	if dbURL == "" {
-		// Можно установить значение по умолчанию или вернуть ошибку
 		return nil, fmt.Errorf("DATABASE_URL environment variable is not set")
 	}
 
 	jwtKey := os.Getenv("JWT_SECRET_KEY")
 	if jwtKey == "" {
-		// Можно установить значение по умолчанию (НЕБЕЗОПАСНО для JWT!) или вернуть ошибку
 		return nil, fmt.Errorf("JWT_SECRET_KEY environment variable is not set")
 	}
 
 	portStr := os.Getenv("SERVER_PORT")
 	if portStr == "" {
-		portStr = "8080" // Порт по умолчанию
+		portStr = "8080"
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil {

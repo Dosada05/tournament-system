@@ -50,42 +50,42 @@ func main() {
 	logger.Info("database connection established")
 
 	userRepo := repositories.NewPostgresUserRepository(db)
-	//teamRepo := repositories.NewPostgresTeamRepository(db)
-	//sportRepo := repositories.NewPostgresSportRepository(db)
+	teamRepo := repositories.NewPostgresTeamRepository(db)
+	sportRepo := repositories.NewPostgresSportRepository(db)
 	//formatRepo := repositories.NewPostgresFormatRepository(db)
 	//tournamentRepo := repositories.NewPostgresTournamentRepository(db)
 	//participantRepo := repositories.NewPostgresParticipantRepository(db)
-	//inviteRepo := repositories.NewPostgresInviteRepository(db)
+	inviteRepo := repositories.NewPostgresInviteRepository(db)
 
 	authService := services.NewAuthService(userRepo)
-	//userService := services.NewUserService(userRepo)
-	//sportService := services.NewSportService(sportRepo)
+	userService := services.NewUserService(userRepo)
+	sportService := services.NewSportService(sportRepo)
 	//formatService := services.NewFormatService(formatRepo)
-	//teamService := services.NewTeamService(teamRepo, userRepo, sportRepo)
-	//inviteService := services.NewInviteService(inviteRepo, teamRepo, userRepo)
+	teamService := services.NewTeamService(teamRepo, userRepo, sportRepo)
+	inviteService := services.NewInviteService(inviteRepo, teamRepo, userRepo)
 	//participantService := services.NewParticipantService(participantRepo, tournamentRepo, userRepo, teamRepo)
 	//tournamentService := services.NewTournamentService(tournamentRepo, sportRepo, formatRepo, userRepo, participantService)
 
 	authHandler := handlers.NewAuthHandler(authService, cfg.JWTSecretKey)
-	// userHandler := handlers.NewUserHandler(userService)
-	// teamHandler := handlers.NewTeamHandler(teamService, userService)
-	// sportHandler := handlers.NewSportHandler(sportService)
+	userHandler := handlers.NewUserHandler(userService)
+	teamHandler := handlers.NewTeamHandler(teamService, userService)
+	sportHandler := handlers.NewSportHandler(sportService)
 	// formatHandler := handlers.NewFormatHandler(formatService)
 	// tournamentHandler := handlers.NewTournamentHandler(tournamentService)
 	// participantHandler := handlers.NewParticipantHandler(participantService, tournamentService)
-	// inviteHandler := handlers.NewInviteHandler(inviteService)
-
+	inviteHandler := handlers.NewInviteHandler(inviteService)
+		
 	router := chi.NewRouter()
 
 	api.SetupRoutes(
 		router,
 		authHandler,
-		// userHandler,
-		// teamHandler,
+		userHandler,
+		teamHandler,
+		sportHandler,
+		inviteHandler,
 		// tournamentHandler,
 		// participantHandler,
-		// sportHandler,
-		// inviteHandler,
 	)
 
 	server := &http.Server{

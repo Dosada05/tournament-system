@@ -17,6 +17,7 @@ var (
 type UserService interface {
 	GetProfileByID(ctx context.Context, userID int) (*models.User, error)
 	UpdateProfile(ctx context.Context, userID int, input UpdateProfileInput) (*models.User, error)
+	ListUsersByTeamID(ctx context.Context, teamID int) ([]models.User, error)
 }
 
 type UpdateProfileInput struct {
@@ -100,4 +101,28 @@ func (s *userService) UpdateProfile(ctx context.Context, userID int, input Updat
 
 	user.PasswordHash = ""
 	return user, nil
+}
+
+func (s *userService) ListUsersByTeamID(ctx context.Context, teamID int) ([]models.User, error) {
+	if teamID <= 0 {
+		return nil, errors.New("invalid team ID") // Базовая валидация ID
+	}
+
+	users, err := s.userRepo.ListByTeamID(ctx, teamID)
+	if err != nil {
+		// В ListByTeamID репозитория обычно нет специфичных ошибок типа NotFound или Conflict,
+		// поэтому просто оборачиваем ошибку репозитория.
+		return nil, fmt.Errorf("failed to list users by team id from repository: %w", err)
+	}
+
+	// Сервис не должен возвращать хеши паролей
+	for i := range users {
+		users[i].PasswordHash = ""
+		// Здесь НЕ нужно очищать users[i].Team, так как репозиторий ListByTeamID
+		// (согласно коду из предыдущего шага) не делает JOIN и не заполняет user.Team.
+		// Если бы он делал JOIN, то очистка была бы нужна здесь.
+	}
+
+	// Возвращаем пустой слайс, если команда пуста (не ошибку)
+	return users, nil
 }

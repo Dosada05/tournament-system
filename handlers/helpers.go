@@ -1,17 +1,24 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/golang-jwt/jwt/v4"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/Dosada05/tournament-system/services" // Импортируем для маппинга ошибок сервисов
 )
 
 type jsonResponse map[string]interface{}
+
+type contextKey string
+
+const userContextKey contextKey = "user"
 
 func readJSON(w http.ResponseWriter, r *http.Request, dst interface{}) error {
 	maxBytes := 1_048_576 // 1MB
@@ -119,6 +126,46 @@ func unauthorizedResponse(w http.ResponseWriter, r *http.Request, message string
 
 func forbiddenResponse(w http.ResponseWriter, r *http.Request, message string) {
 	errorResponse(w, r, http.StatusForbidden, message)
+}
+
+func GetUserIDFromContext(ctx context.Context) (int, error) {
+	claims, ok := ctx.Value(userContextKey).(jwt.MapClaims)
+	if !ok {
+		// Это не должно происходить, если middleware Authenticate отработал корректно
+		return 0, errors.New("user claims not found in context or invalid type")
+	}
+
+	// Клейм 'sub' (subject) обычно содержит ID пользователя.
+	// В JWT числовые значения часто парсятся как float64.
+	sub, ok := claims["sub"]
+	if !ok {
+		return 0, errors.New("missing 'sub' (user ID) claim in token")
+	}
+
+	userIDFloat, ok := sub.(float64)
+	if !ok {
+		// Попытка обработать, если ID сохранен как строка (менее вероятно)
+		subStr, okStr := sub.(string)
+		if okStr {
+			userIDInt, err := strconv.Atoi(subStr)
+			if err == nil {
+				return userIDInt, nil
+			}
+		}
+		return 0, fmt.Errorf("invalid type for 'sub' (user ID) claim: expected float64 or string, got %T", sub)
+	}
+
+	// Проверка на целочисленность float64 перед преобразованием
+	if userIDFloat != float64(int(userIDFloat)) {
+		return 0, fmt.Errorf("'sub' (user ID) claim is not an integer: %f", userIDFloat)
+	}
+
+	userID := int(userIDFloat)
+	if userID <= 0 {
+		return 0, fmt.Errorf("invalid user ID in 'sub' claim: %d", userID)
+	}
+
+	return userID, nil
 }
 
 // mapServiceErrorToHTTP преобразует ошибки сервисного слоя в HTTP-ответы

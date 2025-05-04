@@ -33,8 +33,8 @@ type TeamService interface {
 }
 
 type CreateTeamInput struct {
-	Name      string
-	SportID   int
+	Name      string `json:"name"`
+	SportID   int    `json:"sport_id"`
 	CreatorID int
 }
 

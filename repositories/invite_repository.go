@@ -4,55 +4,41 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	_ "time"
 
 	"github.com/Dosada05/tournament-system/models"
-	"github.com/lib/pq"
+	"github.com/lib/pq" // Для обработки ошибок PostgreSQL
 )
 
 var (
 	ErrInviteNotFound      = errors.New("invite not found")
 	ErrInviteTokenConflict = errors.New("invite token conflict")
-	ErrInviteTeamInvalid   = errors.New("invite team conflict or invalid")
+	ErrInviteTeamInvalid   = errors.New("invalid team for invite") // Ошибка FK
 )
 
-// InviteRepository определяет интерфейс для работы с приглашениями.
 type InviteRepository interface {
-	// Create создает новое приглашение в базе данных.
-	// Заполняет поля ID, CreatedAt, ExpiresAt у переданного объекта invite.
 	Create(ctx context.Context, invite *models.Invite) error
-
-	// GetByToken ищет приглашение по его уникальному токену.
 	GetByToken(ctx context.Context, token string) (*models.Invite, error)
-
-	// ListByTeamID возвращает список действующих (не удаленных) приглашений для команды.
-	ListByTeamID(ctx context.Context, teamID int) ([]*models.Invite, error)
-
-	// Delete удаляет приглашение по его ID.
-	Delete(ctx context.Context, id int) error
-
-	// DeleteExpired удаляет все приглашения, срок действия которых истек.
-	// Возвращает количество удаленных приглашений и ошибку.
-	DeleteExpired(ctx context.Context) (int64, error)
+	GetValidByTeamID(ctx context.Context, teamID int) (*models.Invite, error)
+	Update(ctx context.Context, invite *models.Invite) error
+	DeleteByTeamID(ctx context.Context, teamID int) (int64, error) // Возвращает кол-во удаленных
+	CleanupExpired(ctx context.Context) (int64, error)             // Возвращает кол-во удаленных
 }
 
-// postgresInviteRepository реализует InviteRepository для PostgreSQL.
 type postgresInviteRepository struct {
 	db *sql.DB
 }
 
-// NewPostgresInviteRepository создает новый экземпляр репозитория приглашений.
 func NewPostgresInviteRepository(db *sql.DB) InviteRepository {
 	return &postgresInviteRepository{db: db}
 }
 
 func (r *postgresInviteRepository) Create(ctx context.Context, invite *models.Invite) error {
-	// Предполагаем, что ExpiresAt УЖЕ установлено в сервисном слое перед вызовом Create.
-	// Если нет, можно установить здесь: invite.ExpiresAt = time.Now().Add(срок_действия)
 	query := `
 		INSERT INTO invites (team_id, token, expires_at)
 		VALUES ($1, $2, $3)
-		RETURNING id, created_at` // created_at берем из БД (DEFAULT)
+		RETURNING id, created_at`
 
 	err := r.db.QueryRowContext(ctx, query,
 		invite.TeamID,
@@ -64,20 +50,19 @@ func (r *postgresInviteRepository) Create(ctx context.Context, invite *models.In
 		if pqErr, ok := err.(*pq.Error); ok {
 			switch pqErr.Code {
 			case "23505": // unique_violation
-				// ЗАМЕНИТЕ имя constraint на реальное из вашей схемы!
+				// Предполагаем, что уникальный constraint на token называется invites_token_key
 				if pqErr.Constraint == "invites_token_key" {
 					return ErrInviteTokenConflict
 				}
 			case "23503": // foreign_key_violation
-				// ЗАМЕНИТЕ имя constraint на реальное из вашей схемы!
-				if pqErr.Constraint == "invites_team_id_fkey" || pqErr.Constraint == "fk_invites_team" {
+				// Предполагаем, что FK constraint на team_id называется invites_team_id_fkey
+				if pqErr.Constraint == "invites_team_id_fkey" {
 					return ErrInviteTeamInvalid
 				}
 			}
 		}
-		return err
+		return fmt.Errorf("failed to create invite: %w", err)
 	}
-
 	return nil
 }
 
@@ -87,11 +72,13 @@ func (r *postgresInviteRepository) GetByToken(ctx context.Context, token string)
 		FROM invites
 		WHERE token = $1`
 
+	row := r.db.QueryRowContext(ctx, query, token)
 	invite := &models.Invite{}
-	err := r.db.QueryRowContext(ctx, query, token).Scan(
+
+	err := row.Scan(
 		&invite.ID,
 		&invite.TeamID,
-		&invite.Token, // Сканируем токен, хотя он уже есть
+		&invite.Token,
 		&invite.ExpiresAt,
 		&invite.CreatedAt,
 	)
@@ -100,86 +87,96 @@ func (r *postgresInviteRepository) GetByToken(ctx context.Context, token string)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrInviteNotFound
 		}
-		return nil, err
+		return nil, fmt.Errorf("failed to get invite by token: %w", err)
 	}
-
-	// Проверка на истечение срока действия должна быть в сервисном слое,
-	// так как репозиторий должен просто вернуть найденные данные.
-	// if time.Now().After(invite.ExpiresAt) {
-	//     return nil, ErrInviteExpired // Или ErrInviteNotFound, если не хотим раскрывать, что он был, но истек
-	// }
-
 	return invite, nil
 }
 
-func (r *postgresInviteRepository) ListByTeamID(ctx context.Context, teamID int) ([]*models.Invite, error) {
+func (r *postgresInviteRepository) GetValidByTeamID(ctx context.Context, teamID int) (*models.Invite, error) {
 	query := `
 		SELECT id, team_id, token, expires_at, created_at
 		FROM invites
-		WHERE team_id = $1
-		ORDER BY created_at DESC` // Сначала самые новые
+		WHERE team_id = $1 AND expires_at > NOW()
+		ORDER BY created_at DESC
+		LIMIT 1`
 
-	rows, err := r.db.QueryContext(ctx, query, teamID)
+	row := r.db.QueryRowContext(ctx, query, teamID)
+	invite := &models.Invite{}
+
+	err := row.Scan(
+		&invite.ID,
+		&invite.TeamID,
+		&invite.Token,
+		&invite.ExpiresAt,
+		&invite.CreatedAt,
+	)
+
 	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	invites := make([]*models.Invite, 0)
-	for rows.Next() {
-		var invite models.Invite
-		if scanErr := rows.Scan(
-			&invite.ID,
-			&invite.TeamID,
-			&invite.Token,
-			&invite.ExpiresAt,
-			&invite.CreatedAt,
-		); scanErr != nil {
-			return nil, scanErr
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrInviteNotFound // Не найдено валидных приглашений для команды
 		}
-		invites = append(invites, &invite)
+		return nil, fmt.Errorf("failed to get valid invite by team id: %w", err)
 	}
-
-	if err = rows.Err(); err != nil { // Проверка после цикла
-		return nil, err
-	}
-
-	return invites, nil
+	return invite, nil
 }
 
-func (r *postgresInviteRepository) Delete(ctx context.Context, id int) error {
-	query := `DELETE FROM invites WHERE id = $1`
+func (r *postgresInviteRepository) Update(ctx context.Context, invite *models.Invite) error {
+	query := `
+		UPDATE invites SET
+			token = $1,
+			expires_at = $2
+		WHERE id = $3 AND team_id = $4` // Обновляем только токен и время жизни
 
-	result, err := r.db.ExecContext(ctx, query, id)
+	result, err := r.db.ExecContext(ctx, query,
+		invite.Token,
+		invite.ExpiresAt,
+		invite.ID,
+		invite.TeamID, // Доп. проверка, что мы обновляем инвайт нужной команды
+	)
+
 	if err != nil {
-		// Ошибки FK здесь не ожидаются при удалении
-		return err
+		if pqErr, ok := err.(*pq.Error); ok {
+			if pqErr.Code == "23505" && pqErr.Constraint == "invites_token_key" {
+				return ErrInviteTokenConflict
+			}
+		}
+		return fmt.Errorf("failed to update invite: %w", err)
 	}
 
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return err
+	rowsAffected, checkErr := checkRowsAffected(result)
+	if checkErr != nil {
+		return fmt.Errorf("failed to check affected rows on invite update: %w", checkErr)
 	}
 	if rowsAffected == 0 {
+		// Либо инвайт не найден по ID, либо team_id не совпал
 		return ErrInviteNotFound
 	}
 
 	return nil
 }
 
-func (r *postgresInviteRepository) DeleteExpired(ctx context.Context) (int64, error) {
-	query := `DELETE FROM invites WHERE expires_at <= NOW()`
+func (r *postgresInviteRepository) DeleteByTeamID(ctx context.Context, teamID int) (int64, error) {
+	query := `DELETE FROM invites WHERE team_id = $1`
+	result, err := r.db.ExecContext(ctx, query, teamID)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete invites by team id: %w", err)
+	}
+	rowsAffected, checkErr := checkRowsAffected(result)
+	if checkErr != nil {
+		return 0, fmt.Errorf("failed to check affected rows on invite delete by team id: %w", checkErr)
+	}
+	return rowsAffected, nil
+}
 
+func (r *postgresInviteRepository) CleanupExpired(ctx context.Context) (int64, error) {
+	query := `DELETE FROM invites WHERE expires_at <= NOW()`
 	result, err := r.db.ExecContext(ctx, query)
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("failed to cleanup expired invites: %w", err)
 	}
-
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		// Эта ошибка маловероятна при DELETE без WHERE id=..., но лучше обработать
-		return 0, err
+	rowsAffected, checkErr := checkRowsAffected(result)
+	if checkErr != nil {
+		return 0, fmt.Errorf("failed to check affected rows on expired invite cleanup: %w", checkErr)
 	}
-
 	return rowsAffected, nil
 }

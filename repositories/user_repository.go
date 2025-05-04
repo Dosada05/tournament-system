@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 
 	"github.com/Dosada05/tournament-system/models"
 	"github.com/lib/pq"
@@ -75,11 +76,71 @@ func (r *postgresUserRepository) Create(ctx context.Context, user *models.User) 
 
 func (r *postgresUserRepository) GetByID(ctx context.Context, id int) (*models.User, error) {
 	query := `
-		SELECT id, first_name, last_name, nickname, email, password_hash, role, team_id, created_at
-		FROM users
-		WHERE id = $1`
-	return r.scanUser(ctx, query, id)
+		SELECT
+			u.id, u.first_name, u.last_name, u.nickname, u.email, u.password_hash, u.role, u.team_id, u.created_at,
+			t.id, t.name, t.captain_id, t.sport_id, t.created_at
+		FROM
+			users u
+		LEFT JOIN
+			teams t ON u.team_id = t.id
+		WHERE
+			u.id = $1`
+
+	row := r.db.QueryRowContext(ctx, query, id)
+
+	var user models.User
+	var team models.Team
+
+	var teamID sql.NullInt64
+	var teamName sql.NullString
+	var teamCaptainID sql.NullInt64
+	var teamSportID sql.NullInt64
+	var teamCreatedAt sql.NullTime
+
+	err := row.Scan(
+		&user.ID,
+		&user.FirstName,
+		&user.LastName,
+		&user.Nickname,
+		&user.Email,
+		&user.PasswordHash,
+		&user.Role,
+		&user.TeamID,
+		&user.CreatedAt,
+		// Поля команды (могут быть NULL)
+		&teamID,
+		&teamName,
+		&teamCaptainID,
+		&teamSportID,
+		&teamCreatedAt,
+	)
+
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, fmt.Errorf("failed to scan user with team: %w", err)
+	}
+
+	if teamID.Valid {
+		team.ID = int(teamID.Int64)
+		team.Name = teamName.String
+		team.CaptainID = int(teamCaptainID.Int64)
+		team.SportID = int(teamSportID.Int64)
+		team.CreatedAt = teamCreatedAt.Time
+		user.Team = &team
+	}
+
+	return &user, nil
 }
+
+//func (r *postgresUserRepository) GetByID(ctx context.Context, id int) (*models.User, error) {
+//	query := `
+//		SELECT id, first_name, last_name, nickname, email, password_hash, role, team_id, created_at
+//		FROM users
+//		WHERE id = $1`
+//	return r.scanUser(ctx, query, id)
+//}
 
 func (r *postgresUserRepository) GetByEmail(ctx context.Context, email string) (*models.User, error) {
 	query := `
@@ -172,7 +233,7 @@ func (r *postgresUserRepository) ListByTeamID(ctx context.Context, teamID int) (
 		SELECT id, first_name, last_name, nickname, email, password_hash, role, team_id, created_at
 		FROM users
 		WHERE team_id = $1
-		ORDER BY nickname ASC` // Или ORDER BY created_at ASC/DESC
+		ORDER BY nickname ASC`
 
 	rows, err := r.db.QueryContext(ctx, query, teamID)
 	if err != nil {
