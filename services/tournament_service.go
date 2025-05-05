@@ -12,56 +12,63 @@ import (
 )
 
 var (
-	ErrTournamentNameRequired      = errors.New("tournament name is required")
+	ErrTournamentNameRequired  = errors.New("tournament name is required")
+	ErrTournamentDatesRequired = errors.New("registration, start, and end dates are required")
+
 	ErrTournamentSportNotFound     = errors.New("specified sport not found")
 	ErrTournamentFormatNotFound    = errors.New("specified format not found")
 	ErrTournamentOrganizerNotFound = errors.New("specified organizer user not found")
-	ErrTournamentCannotBeDeleted   = errors.New("tournament cannot be deleted in its current state or due to dependencies")
-	ErrTournamentCreationFailed    = errors.New("failed to create tournament")
-	ErrTournamentUpdateFailed      = errors.New("failed to update tournament")
-	ErrTournamentDeleteFailed      = errors.New("failed to delete tournament")
-	ErrTournamentListFailed        = errors.New("failed to list tournaments")
+
+	ErrTournamentCreationFailed     = errors.New("failed to create tournament")
+	ErrTournamentUpdateFailed       = errors.New("failed to update tournament")
+	ErrTournamentDeleteFailed       = errors.New("failed to delete tournament")
+	ErrTournamentListFailed         = errors.New("failed to list tournaments")
+	ErrTournamentUpdateNotAllowed   = errors.New("tournament update not allowed in current status") // Добавлено
+	ErrTournamentDeletionNotAllowed = errors.New("tournament deletion not allowed")                 // Переименовано/уточнено
+
+	ErrTournamentInUse = repositories.ErrTournamentInUse
 )
 
 type TournamentService interface {
-	CreateTournament(ctx context.Context, input CreateTournamentInput) (*models.Tournament, error)
+	CreateTournament(ctx context.Context, organizerID int, input CreateTournamentInput) (*models.Tournament, error)
 	GetTournamentByID(ctx context.Context, id int) (*models.Tournament, error)
 	ListTournaments(ctx context.Context, filter ListTournamentsFilter) ([]models.Tournament, error)
-	UpdateTournamentDetails(ctx context.Context, id int, input UpdateTournamentDetailsInput) (*models.Tournament, error)
-	UpdateTournamentStatus(ctx context.Context, id int, status models.TournamentStatus) (*models.Tournament, error)
-	DeleteTournament(ctx context.Context, id int) error
+	UpdateTournamentDetails(ctx context.Context, id int, currentUserID int, input UpdateTournamentDetailsInput) (*models.Tournament, error)
+	UpdateTournamentStatus(ctx context.Context, id int, currentUserID int, status models.TournamentStatus) (*models.Tournament, error)
+	DeleteTournament(ctx context.Context, id int, currentUserID int) error
 }
 
 type CreateTournamentInput struct {
-	Name            string
-	Description     *string
-	SportID         int
-	FormatID        int
-	OrganizerID     int
-	RegDate         time.Time
-	StartDate       time.Time
-	EndDate         time.Time
-	Location        *string
-	MaxParticipants int
+	Name            string    `json:"name" validate:"required"`
+	Description     *string   `json:"description"`
+	SportID         int       `json:"sport_id" validate:"required,gt=0"`
+	FormatID        int       `json:"format_id" validate:"required,gt=0"`
+	RegDate         time.Time `json:"reg_date" validate:"required"`
+	StartDate       time.Time `json:"start_date" validate:"required"`
+	EndDate         time.Time `json:"end_date" validate:"required"`
+	Location        *string   `json:"location"`
+	MaxParticipants int       `json:"max_participants" validate:"required,gt=0"`
 }
 
 type UpdateTournamentDetailsInput struct {
-	Name            *string
-	Description     *string
-	RegDate         *time.Time
-	StartDate       *time.Time
-	EndDate         *time.Time
-	Location        *string
-	MaxParticipants *int
+	Name            *string    `json:"name"`
+	Description     *string    `json:"description"`
+	RegDate         *time.Time `json:"reg_date"`
+	StartDate       *time.Time `json:"start_date"`
+	EndDate         *time.Time `json:"end_date"`
+	Location        *string    `json:"location"`
+	MaxParticipants *int       `json:"max_participants" validate:"omitempty,gt=0"`
+	// SportID, FormatID, OrganizerID не обновляются этим методом
 }
 
+// Используется и для сервиса, и для репозитория
 type ListTournamentsFilter struct {
-	SportID     *int
-	FormatID    *int
-	OrganizerID *int
-	Status      *models.TournamentStatus
-	Limit       int
-	Offset      int
+	SportID     *int                     `json:"sport_id"`
+	FormatID    *int                     `json:"format_id"`
+	OrganizerID *int                     `json:"organizer_id"`
+	Status      *models.TournamentStatus `json:"status"`
+	Limit       int                      `json:"limit"`
+	Offset      int                      `json:"offset"`
 }
 
 type tournamentService struct {
@@ -85,64 +92,74 @@ func NewTournamentService(
 	}
 }
 
-func (s *tournamentService) CreateTournament(ctx context.Context, input CreateTournamentInput) (*models.Tournament, error) {
+func (s *tournamentService) CreateTournament(ctx context.Context, organizerID int, input CreateTournamentInput) (*models.Tournament, error) {
+	// 1. Валидация ввода
 	name := strings.TrimSpace(input.Name)
 	if name == "" {
 		return nil, ErrTournamentNameRequired
 	}
-	if input.RegDate.IsZero() || input.StartDate.IsZero() || input.EndDate.IsZero() {
-		return nil, errors.New("registration, start, and end dates are required")
-	}
-	if !input.RegDate.Before(input.StartDate) {
-		return nil, ErrTournamentInvalidRegDate
-	}
-	if !input.StartDate.Before(input.EndDate) {
-		return nil, ErrTournamentInvalidDateRange
+	if err := validateTournamentDates(input.RegDate, input.StartDate, input.EndDate); err != nil {
+		return nil, err
 	}
 	if input.MaxParticipants <= 0 {
 		return nil, ErrTournamentInvalidCapacity
 	}
 
-	if _, err := s.sportRepo.GetByID(ctx, input.SportID); err != nil {
-		if errors.Is(err, repositories.ErrSportNotFound) {
+	// 2. Валидация внешних сущностей
+	var validationErr error
+	_, validationErr = s.sportRepo.GetByID(ctx, input.SportID)
+	if validationErr != nil {
+		if errors.Is(validationErr, repositories.ErrSportNotFound) {
 			return nil, ErrTournamentSportNotFound
 		}
-		return nil, fmt.Errorf("failed to verify sport %d: %w", input.SportID, err)
+		return nil, fmt.Errorf("failed to verify sport %d: %w", input.SportID, validationErr)
 	}
-
-	if _, err := s.formatRepo.GetByID(ctx, input.FormatID); err != nil {
-		if errors.Is(err, repositories.ErrFormatNotFound) {
+	_, validationErr = s.formatRepo.GetByID(ctx, input.FormatID)
+	if validationErr != nil {
+		if errors.Is(validationErr, repositories.ErrFormatNotFound) {
 			return nil, ErrTournamentFormatNotFound
 		}
-		return nil, fmt.Errorf("failed to verify format %d: %w", input.FormatID, err)
+		return nil, fmt.Errorf("failed to verify format %d: %w", input.FormatID, validationErr)
 	}
-
-	_, err := s.userRepo.GetByID(ctx, input.OrganizerID)
-	if err != nil {
-		if errors.Is(err, repositories.ErrUserNotFound) {
+	// Проверяем переданный organizerID
+	_, validationErr = s.userRepo.GetByID(ctx, organizerID)
+	if validationErr != nil {
+		if errors.Is(validationErr, repositories.ErrUserNotFound) {
 			return nil, ErrTournamentOrganizerNotFound
 		}
-		return nil, fmt.Errorf("failed to verify organizer %d: %w", input.OrganizerID, err)
+		return nil, fmt.Errorf("failed to verify organizer %d: %w", organizerID, validationErr)
 	}
 
+	// 3. Создание модели
 	tournament := &models.Tournament{
 		Name:            name,
 		Description:     input.Description,
 		SportID:         input.SportID,
 		FormatID:        input.FormatID,
-		OrganizerID:     input.OrganizerID,
+		OrganizerID:     organizerID, // Используем параметр метода
 		RegDate:         input.RegDate,
 		StartDate:       input.StartDate,
 		EndDate:         input.EndDate,
 		Location:        input.Location,
 		MaxParticipants: input.MaxParticipants,
-		Status:          models.StatusSoon,
+		Status:          models.StatusSoon, // Устанавливаем начальный статус
 	}
 
-	err = s.tournamentRepo.Create(ctx, tournament)
+	// 4. Вызов репозитория
+	err := s.tournamentRepo.Create(ctx, tournament)
 	if err != nil {
 		if errors.Is(err, repositories.ErrTournamentNameConflict) {
 			return nil, ErrTournamentNameConflict
+		}
+		// Обработка FK ошибок от БД (маловероятно, т.к. проверили выше, но для полноты)
+		if errors.Is(err, repositories.ErrTournamentInvalidSport) {
+			return nil, ErrTournamentSportNotFound
+		}
+		if errors.Is(err, repositories.ErrTournamentInvalidFormat) {
+			return nil, ErrTournamentFormatNotFound
+		}
+		if errors.Is(err, repositories.ErrTournamentInvalidOrg) {
+			return nil, ErrTournamentOrganizerNotFound
 		}
 		return nil, fmt.Errorf("%w: %w", ErrTournamentCreationFailed, err)
 	}
@@ -158,31 +175,27 @@ func (s *tournamentService) GetTournamentByID(ctx context.Context, id int) (*mod
 		}
 		return nil, fmt.Errorf("failed to get tournament by id %d: %w", id, err)
 	}
+	// Опционально: загрузить связанные сущности (Sport, Format, Organizer)
 	return tournament, nil
 }
 
 func (s *tournamentService) ListTournaments(ctx context.Context, filter ListTournamentsFilter) ([]models.Tournament, error) {
-	repoFilter := repositories.ListTournamentsFilter{
-		SportID:     filter.SportID,
-		FormatID:    filter.FormatID,
-		OrganizerID: filter.OrganizerID,
-		Status:      filter.Status,
-		Limit:       filter.Limit,
-		Offset:      filter.Offset,
-	}
-
-	tournaments, err := s.tournamentRepo.List(ctx, repoFilter)
+	// Передаем фильтр напрямую, т.к. структура идентична
+	tournaments, err := s.tournamentRepo.List(ctx, repositories.ListTournamentsFilter(filter))
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrTournamentListFailed, err)
 	}
+	// Репозиторий должен возвращать пустой слайс, а не nil, но на всякий случай проверим
 	if tournaments == nil {
 		return []models.Tournament{}, nil
 	}
-
+	// Опционально: обогатить турниры связанными данными (Sport, Format...)
 	return tournaments, nil
 }
 
-func (s *tournamentService) UpdateTournamentDetails(ctx context.Context, id int, input UpdateTournamentDetailsInput) (*models.Tournament, error) {
+// Добавлен параметр currentUserID для авторизации
+func (s *tournamentService) UpdateTournamentDetails(ctx context.Context, id int, currentUserID int, input UpdateTournamentDetailsInput) (*models.Tournament, error) {
+	// 1. Получаем турнир
 	tournament, err := s.tournamentRepo.GetByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, repositories.ErrTournamentNotFound) {
@@ -191,7 +204,19 @@ func (s *tournamentService) UpdateTournamentDetails(ctx context.Context, id int,
 		return nil, fmt.Errorf("failed to get tournament %d for update: %w", id, err)
 	}
 
+	// 2. Авторизация
+	if tournament.OrganizerID != currentUserID {
+		return nil, ErrForbiddenOperation
+	}
+
+	// 3. Проверка статуса (можно ли обновлять?)
+	if tournament.Status != models.StatusSoon && tournament.Status != models.StatusRegistration {
+		// Разрешаем обновление только до начала активной фазы
+		return nil, fmt.Errorf("%w: cannot update tournament in status '%s'", ErrTournamentUpdateNotAllowed, tournament.Status)
+	}
+
 	updated := false
+	// 4. Применение изменений
 	if input.Name != nil {
 		trimmedName := strings.TrimSpace(*input.Name)
 		if trimmedName == "" {
@@ -202,23 +227,25 @@ func (s *tournamentService) UpdateTournamentDetails(ctx context.Context, id int,
 			updated = true
 		}
 	}
-	if input.Description != nil && (tournament.Description == nil || *input.Description != *tournament.Description) {
+	// Сравнение указателей Description
+	if input.Description != nil && derefString(input.Description) != derefString(tournament.Description) {
 		tournament.Description = input.Description
 		updated = true
 	}
-	if input.RegDate != nil && !input.RegDate.Equal(tournament.RegDate) {
+	if input.RegDate != nil && !input.RegDate.IsZero() && !input.RegDate.Equal(tournament.RegDate) {
 		tournament.RegDate = *input.RegDate
 		updated = true
 	}
-	if input.StartDate != nil && !input.StartDate.Equal(tournament.StartDate) {
+	if input.StartDate != nil && !input.StartDate.IsZero() && !input.StartDate.Equal(tournament.StartDate) {
 		tournament.StartDate = *input.StartDate
 		updated = true
 	}
-	if input.EndDate != nil && !input.EndDate.Equal(tournament.EndDate) {
+	if input.EndDate != nil && !input.EndDate.IsZero() && !input.EndDate.Equal(tournament.EndDate) {
 		tournament.EndDate = *input.EndDate
 		updated = true
 	}
-	if input.Location != nil && (tournament.Location == nil || *input.Location != *tournament.Location) {
+	// Сравнение указателей Location
+	if input.Location != nil && derefString(input.Location) != derefString(tournament.Location) {
 		tournament.Location = input.Location
 		updated = true
 	}
@@ -230,17 +257,19 @@ func (s *tournamentService) UpdateTournamentDetails(ctx context.Context, id int,
 		updated = true
 	}
 
-	if !tournament.RegDate.IsZero() && !tournament.StartDate.IsZero() && !tournament.RegDate.Before(tournament.StartDate) {
-		return nil, ErrTournamentInvalidRegDate
-	}
-	if !tournament.StartDate.IsZero() && !tournament.EndDate.IsZero() && !tournament.StartDate.Before(tournament.EndDate) {
-		return nil, ErrTournamentInvalidDateRange
+	// 5. Перепроверка дат, если они менялись
+	if updated { // Проверяем только если были изменения
+		if err := validateTournamentDates(tournament.RegDate, tournament.StartDate, tournament.EndDate); err != nil {
+			return nil, err // Используем ошибки из validateTournamentDates
+		}
 	}
 
+	// 6. Если не было изменений
 	if !updated {
 		return tournament, nil
 	}
 
+	// 7. Вызов репозитория
 	err = s.tournamentRepo.Update(ctx, tournament)
 	if err != nil {
 		if errors.Is(err, repositories.ErrTournamentNameConflict) {
@@ -248,20 +277,22 @@ func (s *tournamentService) UpdateTournamentDetails(ctx context.Context, id int,
 		}
 		if errors.Is(err, repositories.ErrTournamentNotFound) {
 			return nil, ErrTournamentNotFound
-		}
+		} // Удален между Get и Update?
+		// Обработка FK ошибок (если бы SportID/FormatID/OrganizerID обновлялись)
 		return nil, fmt.Errorf("%w: %w", ErrTournamentUpdateFailed, err)
 	}
 
 	return tournament, nil
 }
 
-func (s *tournamentService) UpdateTournamentStatus(ctx context.Context, id int, newStatus models.TournamentStatus) (*models.Tournament, error) {
-	switch newStatus {
-	case models.StatusSoon, models.StatusRegistration, models.StatusActive, models.StatusCompleted, models.StatusCanceled:
-	default:
-		return nil, ErrTournamentInvalidStatus
+// Добавлен параметр currentUserID для авторизации
+func (s *tournamentService) UpdateTournamentStatus(ctx context.Context, id int, currentUserID int, newStatus models.TournamentStatus) (*models.Tournament, error) {
+	// 1. Валидация значения статуса
+	if !isValidTournamentStatus(newStatus) {
+		return nil, fmt.Errorf("%w: '%s'", ErrTournamentInvalidStatus, newStatus)
 	}
 
+	// 2. Получаем турнир
 	tournament, err := s.tournamentRepo.GetByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, repositories.ErrTournamentNotFound) {
@@ -270,42 +301,61 @@ func (s *tournamentService) UpdateTournamentStatus(ctx context.Context, id int, 
 		return nil, fmt.Errorf("failed to get tournament %d for status update: %w", id, err)
 	}
 
-	if !isValidStatusTransition(tournament.Status, newStatus) {
-		return nil, fmt.Errorf("%w: from %s to %s", ErrTournamentInvalidStatusTransition, tournament.Status, newStatus)
+	// 3. Авторизация
+	if tournament.OrganizerID != currentUserID {
+		return nil, ErrForbiddenOperation
 	}
 
+	// 4. Валидация перехода
+	if !isValidStatusTransition(tournament.Status, newStatus) {
+		return nil, fmt.Errorf("%w: from '%s' to '%s'", ErrTournamentInvalidStatusTransition, tournament.Status, newStatus)
+	}
+
+	// 5. Вызов репозитория
 	err = s.tournamentRepo.UpdateStatus(ctx, id, newStatus)
 	if err != nil {
 		if errors.Is(err, repositories.ErrTournamentNotFound) {
 			return nil, ErrTournamentNotFound
-		}
-		return nil, fmt.Errorf("%w: %w", ErrTournamentUpdateFailed, err)
+		} // Удален?
+		// UpdateStatus обычно не вызывает конфликтов или FK ошибок
+		return nil, fmt.Errorf("%w: failed to update status in repository: %w", ErrTournamentUpdateFailed, err)
 	}
 
+	// 6. Обновляем статус в объекте и возвращаем
 	tournament.Status = newStatus
 	return tournament, nil
 }
 
-func (s *tournamentService) DeleteTournament(ctx context.Context, id int) error {
+// Добавлен параметр currentUserID для авторизации
+func (s *tournamentService) DeleteTournament(ctx context.Context, id int, currentUserID int) error {
+	// 1. Получаем турнир для проверок
 	tournament, err := s.tournamentRepo.GetByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, repositories.ErrTournamentNotFound) {
 			return ErrTournamentNotFound
-		}
+		} // Уже удален
 		return fmt.Errorf("failed to get tournament %d for deletion check: %w", id, err)
 	}
 
-	if tournament.Status != models.StatusSoon && tournament.Status != models.StatusCanceled {
-		return fmt.Errorf("%w: cannot delete tournament with status %s", ErrTournamentCannotBeDeleted, tournament.Status)
+	// 2. Авторизация
+	if tournament.OrganizerID != currentUserID {
+		return ErrForbiddenOperation
 	}
 
+	if tournament.Status != models.StatusSoon && tournament.Status != models.StatusRegistration && tournament.Status != models.StatusCanceled {
+		return fmt.Errorf("%w: cannot delete tournament with status '%s'", ErrTournamentDeletionNotAllowed, tournament.Status)
+	}
+
+	// 4. Вызов репозитория
 	err = s.tournamentRepo.Delete(ctx, id)
 	if err != nil {
 		if errors.Is(err, repositories.ErrTournamentNotFound) {
 			return ErrTournamentNotFound
-		}
+		} // Уже удален
+		// Обрабатываем ошибку FK constraint violation (ErrTournamentInUse)
 		if errors.Is(err, repositories.ErrTournamentInUse) {
-			return ErrTournamentCannotBeDeleted
+			// Можно вернуть более специфичную ошибку, если нужно знать причину (участники или матчи)
+			return fmt.Errorf("%w: tournament might have participants or matches", ErrTournamentDeletionNotAllowed)
 		}
 		return fmt.Errorf("%w: %w", ErrTournamentDeleteFailed, err)
 	}
@@ -313,27 +363,59 @@ func (s *tournamentService) DeleteTournament(ctx context.Context, id int) error 
 	return nil
 }
 
+func isValidTournamentStatus(status models.TournamentStatus) bool {
+	switch status {
+	case models.StatusSoon, models.StatusRegistration, models.StatusActive, models.StatusCompleted, models.StatusCanceled:
+		return true
+	default:
+		return false
+	}
+}
+
+// isValidStatusTransition определяет допустимые переходы между статусами
 func isValidStatusTransition(current, next models.TournamentStatus) bool {
 	if current == next {
-		return true
+		return true // Разрешаем "обновление" на тот же статус
 	}
 
+	// Карта разрешенных переходов
 	allowedTransitions := map[models.TournamentStatus][]models.TournamentStatus{
 		models.StatusSoon:         {models.StatusRegistration, models.StatusCanceled},
-		models.StatusRegistration: {models.StatusActive, models.StatusCanceled},
+		models.StatusRegistration: {models.StatusActive, models.StatusCanceled}, // Можно добавить Soon?
 		models.StatusActive:       {models.StatusCompleted, models.StatusCanceled},
-		models.StatusCompleted:    {},
-		models.StatusCanceled:     {},
+		models.StatusCompleted:    {}, // Нельзя выйти из Completed
+		models.StatusCanceled:     {}, // Нельзя выйти из Canceled
 	}
 
 	allowed, ok := allowedTransitions[current]
 	if !ok {
-		return false
+		return false // Неизвестный текущий статус
 	}
 	for _, nextAllowed := range allowed {
 		if next == nextAllowed {
 			return true
 		}
 	}
-	return false
+	return false // Переход не найден в списке разрешенных
+}
+
+func validateTournamentDates(reg, start, end time.Time) error {
+	if reg.IsZero() || start.IsZero() || end.IsZero() {
+		return ErrTournamentDatesRequired
+	}
+	if reg.After(start) { // reg > start
+		return fmt.Errorf("%w: registration date (%s) cannot be after start date (%s)", ErrTournamentInvalidRegDate, reg.Format(time.DateOnly), start.Format(time.DateOnly))
+	}
+	if !start.Before(end) { // start >= end
+		return fmt.Errorf("%w: start date (%s) must be before end date (%s)", ErrTournamentInvalidDateRange, start.Format(time.DateOnly), end.Format(time.DateOnly))
+	}
+	return nil
+}
+
+// derefString безопасно разыменовывает *string, возвращая "" если указатель nil
+func derefString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
 }
