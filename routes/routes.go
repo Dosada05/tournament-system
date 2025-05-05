@@ -14,22 +14,21 @@ import (
 func SetupRoutes(
 	router *chi.Mux,
 	authHandler *handlers.AuthHandler,
-// Добавь здесь другие хендлеры, когда они будут готовы:
 	userHandler *handlers.UserHandler,
 	teamHandler *handlers.TeamHandler,
-// tournamentHandler *handlers.TournamentHandler,
-// participantHandler *handlers.ParticipantHandler,
+	// tournamentHandler *handlers.TournamentHandler,
+	// participantHandler *handlers.ParticipantHandler,
 	sportHandler *handlers.SportHandler,
 	inviteHandler *handlers.InviteHandler,
 ) {
 
 	router.Use(chiMiddleware.Logger)
 	router.Use(chiMiddleware.Recoverer)
-	router.Use(chiMiddleware.RequestID) // Полезно для трассировки
-	router.Use(chiMiddleware.RealIP)    // Получение реального IP клиента
+	router.Use(chiMiddleware.RequestID)
+	router.Use(chiMiddleware.RealIP)
 
 	router.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"}, // ВНИМАНИЕ: Замени на домены фронтенда в продакшене
+		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
 		ExposedHeaders:   []string{"Link"},
@@ -85,15 +84,12 @@ func SetupRoutes(
 
 	router.Group(func(authRouter chi.Router) {
 		authRouter.Use(middleware.Authenticate)
-		authRouter.Post("/invites/{token}", inviteHandler.JoinTeamHandler)
+		authRouter.Get("/invites/{token}", inviteHandler.JoinTeamHandler)
 	})
 
-	// Эндпоинты для управления приглашениями команды (требуют аутентификации капитана)
-	// Они вложены в /teams/{teamID}/, поэтому teamID будет доступен
 	router.Route("/teams/{teamID}/invites", func(r chi.Router) {
 		r.Use(middleware.Authenticate) // Все эндпоинты здесь требуют аутентификации
 
-		// Можно добавить middleware для проверки роли капитана, если сервис не делает этого
 		// r.Use(middleware.AuthorizeCaptainOrAdmin)
 
 		r.Post("/", inviteHandler.CreateOrRenewInviteHandler)
