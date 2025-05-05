@@ -52,8 +52,8 @@ func main() {
 	userRepo := repositories.NewPostgresUserRepository(db)
 	teamRepo := repositories.NewPostgresTeamRepository(db)
 	sportRepo := repositories.NewPostgresSportRepository(db)
-	//formatRepo := repositories.NewPostgresFormatRepository(db)
-	//tournamentRepo := repositories.NewPostgresTournamentRepository(db)
+	formatRepo := repositories.NewPostgresFormatRepository(db)
+	tournamentRepo := repositories.NewPostgresTournamentRepository(db)
 	//participantRepo := repositories.NewPostgresParticipantRepository(db)
 	inviteRepo := repositories.NewPostgresInviteRepository(db)
 
@@ -64,17 +64,17 @@ func main() {
 	teamService := services.NewTeamService(teamRepo, userRepo, sportRepo)
 	inviteService := services.NewInviteService(inviteRepo, teamRepo, userRepo)
 	//participantService := services.NewParticipantService(participantRepo, tournamentRepo, userRepo, teamRepo)
-	//tournamentService := services.NewTournamentService(tournamentRepo, sportRepo, formatRepo, userRepo, participantService)
+	tournamentService := services.NewTournamentService(tournamentRepo, sportRepo, formatRepo, userRepo)
 
 	authHandler := handlers.NewAuthHandler(authService, cfg.JWTSecretKey)
 	userHandler := handlers.NewUserHandler(userService)
 	teamHandler := handlers.NewTeamHandler(teamService, userService)
 	sportHandler := handlers.NewSportHandler(sportService)
-	// formatHandler := handlers.NewFormatHandler(formatService)
-	// tournamentHandler := handlers.NewTournamentHandler(tournamentService)
+	//formatHandler := handlers.NewFormatHandler(formatService)
+	tournamentHandler := handlers.NewTournamentHandler(tournamentService)
 	// participantHandler := handlers.NewParticipantHandler(participantService, tournamentService)
 	inviteHandler := handlers.NewInviteHandler(inviteService)
-		
+
 	router := chi.NewRouter()
 
 	api.SetupRoutes(
@@ -82,9 +82,9 @@ func main() {
 		authHandler,
 		userHandler,
 		teamHandler,
+		tournamentHandler,
 		sportHandler,
 		inviteHandler,
-		// tournamentHandler,
 		// participantHandler,
 	)
 

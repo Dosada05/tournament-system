@@ -16,8 +16,8 @@ func SetupRoutes(
 	authHandler *handlers.AuthHandler,
 	userHandler *handlers.UserHandler,
 	teamHandler *handlers.TeamHandler,
-// tournamentHandler *handlers.TournamentHandler,
-// participantHandler *handlers.ParticipantHandler,
+	tournamentHandler *handlers.TournamentHandler,
+	// participantHandler *handlers.ParticipantHandler,
 	sportHandler *handlers.SportHandler,
 	inviteHandler *handlers.InviteHandler,
 ) {
@@ -62,6 +62,21 @@ func SetupRoutes(
 			authRouter.Delete("/{teamID}", teamHandler.DeleteTeam)
 			authRouter.Post("/{teamID}/members/{userID}", teamHandler.AddMember)
 			authRouter.Delete("/{teamID}/members/{userID}", teamHandler.RemoveMember)
+		})
+	})
+
+	router.Route("/tournaments", func(r chi.Router) {
+		r.Get("/", tournamentHandler.ListHandler)
+		r.Get("/{tournamentID}", tournamentHandler.GetByIDHandler)
+
+		// Эндпоинты, требующие аутентификации
+		r.Group(func(authRouter chi.Router) {
+			authRouter.Use(middleware.Authenticate)
+
+			authRouter.Post("/", tournamentHandler.CreateHandler)
+			authRouter.Put("/{tournamentID}", tournamentHandler.UpdateDetailsHandler)
+			authRouter.Patch("/{tournamentID}/status", tournamentHandler.UpdateStatusHandler)
+			authRouter.Delete("/{tournamentID}", tournamentHandler.DeleteHandler)
 		})
 	})
 
