@@ -1,7 +1,7 @@
 package utils
 
 import (
-	"errors"
+	"golang.org/x/crypto/bcrypt"
 	"os"
 )
 
@@ -22,23 +22,25 @@ func getEnvOrDefault(key, defaultValue string) string {
 	return defaultValue
 }
 
-func GetJWTSecretBytes() ([]byte, error) {
-	secret := os.Getenv("JWT_SECRET")
-	if secret == "" {
-		return nil, errors.New("JWT_SECRET environment variable not set")
-	}
-	return []byte(secret), nil
+func HashPassword(password string) (string, error) {
+	bytes, err := bcrypt.GenerateFromPassword([]byte(password), BcryptCost)
+	return string(bytes), err
 }
 
-//func HashPassword(password string) (string, error) {
-//	bytes, err := bcrypt.GenerateFromPassword([]byte(password), BcryptCost)
-//	return string(bytes), err
-//}
-//
-//func CheckPasswordHash(password, hash string) bool {
-//	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
-//	return err == nil
-//}
+func CheckPasswordHash(password, hash string) bool {
+	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
+	return err == nil
+}
+
+func IsValidEmail(email string) bool {
+	// Реализация проверки формата email (например, с помощью regexp)
+	// Пример:
+	// const emailRegex = `^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$`
+	// re := regexp.MustCompile(emailRegex)
+	// return re.MatchString(email)
+	return true // Заглушка
+}
+
 //
 //func GenerateJWT(user *models.User) (string, error) {
 //	now := time.Now()
