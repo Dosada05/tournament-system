@@ -16,8 +16,8 @@ func SetupRoutes(
 	authHandler *handlers.AuthHandler,
 	userHandler *handlers.UserHandler,
 	teamHandler *handlers.TeamHandler,
-	// tournamentHandler *handlers.TournamentHandler,
-	// participantHandler *handlers.ParticipantHandler,
+// tournamentHandler *handlers.TournamentHandler,
+// participantHandler *handlers.ParticipantHandler,
 	sportHandler *handlers.SportHandler,
 	inviteHandler *handlers.InviteHandler,
 ) {
@@ -84,7 +84,7 @@ func SetupRoutes(
 
 	router.Group(func(authRouter chi.Router) {
 		authRouter.Use(middleware.Authenticate)
-		authRouter.Get("/invites/{token}", inviteHandler.JoinTeamHandler)
+		authRouter.Post("/invites/{token}", inviteHandler.JoinTeamHandler)
 	})
 
 	router.Route("/teams/{teamID}/invites", func(r chi.Router) {
