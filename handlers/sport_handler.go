@@ -1,10 +1,14 @@
 package handlers
 
 import (
+	"errors"
+	"fmt"
+	"net/http"
+
 	"github.com/Dosada05/tournament-system/middleware"
 	"github.com/Dosada05/tournament-system/models"
 	"github.com/Dosada05/tournament-system/services"
-	"net/http"
+	// "github.com/go-chi/chi/v5" // Если getIDFromURL будет использоваться
 )
 
 type SportHandler struct {
@@ -23,9 +27,8 @@ func (h *SportHandler) CreateSport(w http.ResponseWriter, r *http.Request) {
 		unauthorizedResponse(w, r, "failed to identify current user role")
 		return
 	}
-
 	if currentUserRole != models.RoleAdmin {
-		forbiddenResponse(w, r, "admin privileges required to update sport")
+		forbiddenResponse(w, r, "admin privileges required to create sport")
 		return
 	}
 
@@ -48,7 +51,7 @@ func (h *SportHandler) CreateSport(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *SportHandler) GetSportByID(w http.ResponseWriter, r *http.Request) {
-	sportID, err := getIDFromURL(r, "sportID")
+	sportID, err := getIDFromURL(r, "sportID") // Предполагаем, что getIDFromURL доступна
 	if err != nil {
 		badRequestResponse(w, r, err)
 		return
@@ -85,7 +88,6 @@ func (h *SportHandler) UpdateSport(w http.ResponseWriter, r *http.Request) {
 		unauthorizedResponse(w, r, "failed to identify current user role")
 		return
 	}
-
 	if currentUserRole != models.RoleAdmin {
 		forbiddenResponse(w, r, "admin privileges required to update sport")
 		return
@@ -121,9 +123,8 @@ func (h *SportHandler) DeleteSport(w http.ResponseWriter, r *http.Request) {
 		unauthorizedResponse(w, r, "failed to identify current user role")
 		return
 	}
-
 	if currentUserRole != models.RoleAdmin {
-		forbiddenResponse(w, r, "admin privileges required to update sport")
+		forbiddenResponse(w, r, "admin privileges required to delete sport")
 		return
 	}
 
@@ -142,6 +143,56 @@ func (h *SportHandler) DeleteSport(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// Вспомогательная функция getIDFromURL должна быть доступна здесь
-// (либо в этом пакете, либо в общем пакете хелперов, как было ранее)
-// func getIDFromURL(r *http.Request, paramName string) (int, error) { ... }
+func (h *SportHandler) UploadSportLogoHandler(w http.ResponseWriter, r *http.Request) {
+	currentUserRole, err := middleware.GetUserRoleFromContext(r.Context())
+	if err != nil {
+		unauthorizedResponse(w, r, "failed to identify current user role")
+		return
+	}
+	if currentUserRole != models.RoleAdmin {
+		forbiddenResponse(w, r, "admin privileges required to upload sport logo")
+		return
+	}
+
+	sportID, err := getIDFromURL(r, "sportID")
+	if err != nil {
+		badRequestResponse(w, r, err)
+		return
+	}
+
+	currentUserID, err := middleware.GetUserIDFromContext(r.Context())
+	if err != nil {
+		unauthorizedResponse(w, r, "failed to identify current user for logo upload")
+		return
+	}
+
+	err = r.ParseMultipartForm(32 << 20)
+	if err != nil {
+		badRequestResponse(w, r, fmt.Errorf("failed to parse multipart form: %w", err))
+		return
+	}
+
+	file, header, err := r.FormFile("logo") // "logo" - имя поля в форме
+	if err != nil {
+		badRequestResponse(w, r, fmt.Errorf("failed to get logo file from form: %w", err))
+		return
+	}
+	defer file.Close()
+
+	contentType := header.Header.Get("Content-Type")
+	if contentType == "" {
+		badRequestResponse(w, r, errors.New("content-type header is required for logo"))
+		return
+	}
+
+	sport, err := h.sportService.UploadSportLogo(r.Context(), sportID, currentUserID, file, contentType)
+	if err != nil {
+		mapServiceErrorToHTTP(w, r, err)
+		return
+	}
+
+	response := jsonResponse{"sport": sport}
+	if err := writeJSON(w, http.StatusOK, response, nil); err != nil {
+		serverErrorResponse(w, r, err)
+	}
+}

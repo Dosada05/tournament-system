@@ -161,3 +161,20 @@ CREATE INDEX idx_invites_expires_at ON invites (expires_at);
 CREATE INDEX idx_invites_team_id ON invites (team_id);
 
 -- +migrate StatementEnd
+
+
+-- Добавляем поле для ключа логотипа в таблицу users
+ALTER TABLE users
+    ADD COLUMN logo_key VARCHAR(255); -- Длина 255 должна быть достаточной для ключа/пути
+
+-- Добавляем поле для ключа логотипа в таблицу teams
+ALTER TABLE teams
+    ADD COLUMN logo_key VARCHAR(255);
+
+-- Добавляем поле для ключа логотипа в таблицу sports
+ALTER TABLE sports
+    ADD COLUMN logo_key VARCHAR(255);
+
+-- Добавляем поле для ключа логотипа в таблицу tournaments
+ALTER TABLE tournaments
+    ADD COLUMN logo_key VARCHAR(255);

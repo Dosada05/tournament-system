@@ -12,8 +12,8 @@ import (
 var (
 	ErrTeamNotFound       = errors.New("team not found")
 	ErrTeamNameConflict   = errors.New("team name conflict")
-	ErrTeamCaptainInvalid = errors.New("team captain conflict or invalid") // Если FK на captain_id нарушен
-	ErrTeamSportInvalid   = errors.New("team sport conflict or invalid")   // Если FK на sport_id нарушен
+	ErrTeamCaptainInvalid = errors.New("team captain conflict or invalid")
+	ErrTeamSportInvalid   = errors.New("team sport conflict or invalid")
 )
 
 type TeamRepository interface {
@@ -23,9 +23,7 @@ type TeamRepository interface {
 	Update(ctx context.Context, team *models.Team) error
 	Delete(ctx context.Context, id int) error
 	ExistsByName(ctx context.Context, name string) (bool, error)
-	// Дополнительные методы, если нужны:
-	// GetByCaptainID(ctx context.Context, captainID int) ([]models.Team, error)
-	// GetBySportID(ctx context.Context, sportID int) ([]models.Team, error)
+	UpdateLogoKey(ctx context.Context, teamID int, logoKey *string) error
 }
 
 type postgresTeamRepository struct {
@@ -51,15 +49,15 @@ func (r *postgresTeamRepository) Create(ctx context.Context, team *models.Team) 
 	if err != nil {
 		if pqErr, ok := err.(*pq.Error); ok {
 			switch pqErr.Code {
-			case "23505": // unique_violation
-				if pqErr.Constraint == "teams_name_key" { // Укажите реальное имя constraint
+			case "23505":
+				if pqErr.Constraint == "teams_name_key" {
 					return ErrTeamNameConflict
 				}
-			case "23503": // foreign_key_violation
-				if pqErr.Constraint == "fk_teams_captain" || pqErr.Constraint == "teams_captain_id_fkey" { // Укажите реальное имя constraint
+			case "23503":
+				if pqErr.Constraint == "fk_teams_captain" || pqErr.Constraint == "teams_captain_id_fkey" {
 					return ErrTeamCaptainInvalid
 				}
-				if pqErr.Constraint == "fk_teams_sport" { // Укажите реальное имя constraint
+				if pqErr.Constraint == "fk_teams_sport" {
 					return ErrTeamSportInvalid
 				}
 			}
@@ -72,7 +70,7 @@ func (r *postgresTeamRepository) Create(ctx context.Context, team *models.Team) 
 
 func (r *postgresTeamRepository) GetByID(ctx context.Context, id int) (*models.Team, error) {
 	query := `
-		SELECT id, name, sport_id, captain_id, created_at
+		SELECT id, name, sport_id, captain_id, created_at, logo_key
 		FROM teams
 		WHERE id = $1`
 
@@ -83,6 +81,7 @@ func (r *postgresTeamRepository) GetByID(ctx context.Context, id int) (*models.T
 		&team.SportID,
 		&team.CaptainID,
 		&team.CreatedAt,
+		&team.LogoKey,
 	)
 
 	if err != nil {
@@ -97,9 +96,9 @@ func (r *postgresTeamRepository) GetByID(ctx context.Context, id int) (*models.T
 
 func (r *postgresTeamRepository) GetAll(ctx context.Context) ([]models.Team, error) {
 	query := `
-		SELECT id, name, sport_id, captain_id, created_at
+		SELECT id, name, sport_id, captain_id, created_at, logo_key
 		FROM teams
-		ORDER BY name ASC` // Или ORDER BY created_at DESC, или по другому полю
+		ORDER BY name ASC`
 
 	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {
@@ -107,7 +106,7 @@ func (r *postgresTeamRepository) GetAll(ctx context.Context) ([]models.Team, err
 	}
 	defer rows.Close()
 
-	teams := make([]models.Team, 0) // Инициализация пустого слайса
+	teams := make([]models.Team, 0)
 	for rows.Next() {
 		var team models.Team
 		if scanErr := rows.Scan(
@@ -116,14 +115,13 @@ func (r *postgresTeamRepository) GetAll(ctx context.Context) ([]models.Team, err
 			&team.SportID,
 			&team.CaptainID,
 			&team.CreatedAt,
+			&team.LogoKey,
 		); scanErr != nil {
-			// Если ошибка при сканировании одной строки, лучше вернуть её сразу
 			return nil, scanErr
 		}
 		teams = append(teams, team)
 	}
 
-	// Важно проверить ошибку после завершения цикла rows.Next()
 	if err = rows.Err(); err != nil {
 		return nil, err
 	}
@@ -146,11 +144,11 @@ func (r *postgresTeamRepository) Update(ctx context.Context, team *models.Team) 
 	if err != nil {
 		if pqErr, ok := err.(*pq.Error); ok {
 			switch pqErr.Code {
-			case "23505": // unique_violation
+			case "23505":
 				if pqErr.Constraint == "teams_name_key" {
 					return ErrTeamNameConflict
 				}
-			case "23503": // foreign_key_violation
+			case "23503":
 				if pqErr.Constraint == "fk_teams_captain" || pqErr.Constraint == "teams_captain_id_fkey" {
 					return ErrTeamCaptainInvalid
 				}
@@ -178,9 +176,6 @@ func (r *postgresTeamRepository) Delete(ctx context.Context, id int) error {
 
 	result, err := r.db.ExecContext(ctx, query, id)
 	if err != nil {
-		// Теоретически, здесь может быть ошибка FK, если на команду кто-то ссылается
-		// и нет ON DELETE CASCADE (например, users.team_id без ON DELETE SET NULL)
-		// Можно добавить проверку на pqErr.Code "23503" (foreign_key_violation), если нужно
 		return err
 	}
 
@@ -196,13 +191,31 @@ func (r *postgresTeamRepository) Delete(ctx context.Context, id int) error {
 }
 
 func (r *postgresTeamRepository) ExistsByName(ctx context.Context, name string) (bool, error) {
-	// Более эффективный способ проверить существование
 	query := `SELECT EXISTS (SELECT 1 FROM teams WHERE name = $1)`
 	var exists bool
 	err := r.db.QueryRowContext(ctx, query, name).Scan(&exists)
 	if err != nil {
-		// Ошибки sql.ErrNoRows здесь быть не должно, т.к. EXISTS всегда возвращает строку
 		return false, err
 	}
 	return exists, nil
+}
+
+func (r *postgresTeamRepository) UpdateLogoKey(ctx context.Context, teamID int, logoKey *string) error {
+	query := `
+		UPDATE teams
+		SET logo_key = $1
+		WHERE id = $2`
+
+	result, err := r.db.ExecContext(ctx, query, logoKey, teamID)
+	if err != nil {
+		return err
+	}
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return ErrTeamNotFound
+	}
+	return nil
 }

@@ -13,5 +13,7 @@ type Team struct {
 	Captain      *User         `json:"captain,omitempty" db:"-"`
 	Members      []User        `json:"members,omitempty" db:"-"`
 	Participants []Participant `json:"participants,omitempty" db:"-"`
-	//Invites      []Invite      `json:"invites,omitempty" db:"-"`
+
+	LogoKey *string `json:"-" db:"logo_key"`
+	LogoURL *string `json:"logo_url,omitempty" db:"-"`
 }

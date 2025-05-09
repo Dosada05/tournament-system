@@ -2,17 +2,17 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
-	"strconv" // Для парсинга query параметров
+	"strconv"
 
 	"github.com/Dosada05/tournament-system/middleware"
-	"github.com/Dosada05/tournament-system/models" // Для статусов
+	"github.com/Dosada05/tournament-system/models"
 	"github.com/Dosada05/tournament-system/services"
 )
 
 type TournamentHandler struct {
 	tournamentService services.TournamentService
-	// Добавить validator, если используется
 }
 
 func NewTournamentHandler(ts services.TournamentService) *TournamentHandler {
@@ -21,7 +21,6 @@ func NewTournamentHandler(ts services.TournamentService) *TournamentHandler {
 	}
 }
 
-// createHandler обрабатывает POST /tournaments
 func (h *TournamentHandler) CreateHandler(w http.ResponseWriter, r *http.Request) {
 	currentUserID, err := middleware.GetUserIDFromContext(r.Context())
 	if err != nil {
@@ -35,11 +34,9 @@ func (h *TournamentHandler) CreateHandler(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Здесь можно добавить валидацию input с помощью validator, если он есть
-
 	tournament, err := h.tournamentService.CreateTournament(r.Context(), currentUserID, input)
 	if err != nil {
-		mapTournamentServiceErrorToHTTP(w, r, err) // Используем специфичный маппер
+		mapServiceErrorToHTTP(w, r, err) // Используем общий маппер
 		return
 	}
 
@@ -48,7 +45,6 @@ func (h *TournamentHandler) CreateHandler(w http.ResponseWriter, r *http.Request
 	}
 }
 
-// getByIDHandler обрабатывает GET /tournaments/{tournamentID}
 func (h *TournamentHandler) GetByIDHandler(w http.ResponseWriter, r *http.Request) {
 	id, err := getIDFromURL(r, "tournamentID")
 	if err != nil {
@@ -58,7 +54,7 @@ func (h *TournamentHandler) GetByIDHandler(w http.ResponseWriter, r *http.Reques
 
 	tournament, err := h.tournamentService.GetTournamentByID(r.Context(), id)
 	if err != nil {
-		mapTournamentServiceErrorToHTTP(w, r, err)
+		mapServiceErrorToHTTP(w, r, err)
 		return
 	}
 
@@ -67,9 +63,7 @@ func (h *TournamentHandler) GetByIDHandler(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-// listHandler обрабатывает GET /tournaments
 func (h *TournamentHandler) ListHandler(w http.ResponseWriter, r *http.Request) {
-	// Парсинг query параметров для фильтрации
 	var filter services.ListTournamentsFilter
 	query := r.URL.Query()
 
@@ -99,8 +93,6 @@ func (h *TournamentHandler) ListHandler(w http.ResponseWriter, r *http.Request) 
 	}
 	if statusStr := query.Get("status"); statusStr != "" {
 		status := models.TournamentStatus(statusStr)
-		// Проверка, валиден ли статус (можно использовать isValidTournamentStatus из сервиса)
-		// if !isValidTournamentStatus(status) { ... }
 		filter.Status = &status
 	}
 	if limitStr := query.Get("limit"); limitStr != "" {
@@ -111,7 +103,7 @@ func (h *TournamentHandler) ListHandler(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	} else {
-		filter.Limit = 20 // Значение по умолчанию
+		filter.Limit = 20
 	}
 	if offsetStr := query.Get("offset"); offsetStr != "" {
 		if offset, err := strconv.Atoi(offsetStr); err == nil && offset >= 0 {
@@ -124,17 +116,15 @@ func (h *TournamentHandler) ListHandler(w http.ResponseWriter, r *http.Request) 
 
 	tournaments, err := h.tournamentService.ListTournaments(r.Context(), filter)
 	if err != nil {
-		mapTournamentServiceErrorToHTTP(w, r, err)
+		mapServiceErrorToHTTP(w, r, err)
 		return
 	}
 
-	// Возвращаем список (даже если он пустой)
 	if err := writeJSON(w, http.StatusOK, jsonResponse{"tournaments": tournaments}, nil); err != nil {
 		serverErrorResponse(w, r, err)
 	}
 }
 
-// updateDetailsHandler обрабатывает PUT /tournaments/{tournamentID}
 func (h *TournamentHandler) UpdateDetailsHandler(w http.ResponseWriter, r *http.Request) {
 	id, err := getIDFromURL(r, "tournamentID")
 	if err != nil {
@@ -154,11 +144,9 @@ func (h *TournamentHandler) UpdateDetailsHandler(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Валидация input с помощью validator...
-
 	tournament, err := h.tournamentService.UpdateTournamentDetails(r.Context(), id, currentUserID, input)
 	if err != nil {
-		mapTournamentServiceErrorToHTTP(w, r, err)
+		mapServiceErrorToHTTP(w, r, err)
 		return
 	}
 
@@ -167,7 +155,6 @@ func (h *TournamentHandler) UpdateDetailsHandler(w http.ResponseWriter, r *http.
 	}
 }
 
-// updateStatusHandler обрабатывает PATCH /tournaments/{tournamentID}/status
 func (h *TournamentHandler) UpdateStatusHandler(w http.ResponseWriter, r *http.Request) {
 	id, err := getIDFromURL(r, "tournamentID")
 	if err != nil {
@@ -189,11 +176,9 @@ func (h *TournamentHandler) UpdateStatusHandler(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Валидация statusInput.Status...
-
 	tournament, err := h.tournamentService.UpdateTournamentStatus(r.Context(), id, currentUserID, statusInput.Status)
 	if err != nil {
-		mapTournamentServiceErrorToHTTP(w, r, err)
+		mapServiceErrorToHTTP(w, r, err)
 		return
 	}
 
@@ -202,7 +187,6 @@ func (h *TournamentHandler) UpdateStatusHandler(w http.ResponseWriter, r *http.R
 	}
 }
 
-// deleteHandler обрабатывает DELETE /tournaments/{tournamentID}
 func (h *TournamentHandler) DeleteHandler(w http.ResponseWriter, r *http.Request) {
 	id, err := getIDFromURL(r, "tournamentID")
 	if err != nil {
@@ -218,49 +202,53 @@ func (h *TournamentHandler) DeleteHandler(w http.ResponseWriter, r *http.Request
 
 	err = h.tournamentService.DeleteTournament(r.Context(), id, currentUserID)
 	if err != nil {
-		mapTournamentServiceErrorToHTTP(w, r, err)
+		mapServiceErrorToHTTP(w, r, err)
 		return
 	}
 
-	w.WriteHeader(http.StatusNoContent) // Успешное удаление
+	w.WriteHeader(http.StatusNoContent)
 }
 
-// mapTournamentServiceErrorToHTTP преобразует ошибки TournamentService в HTTP статусы.
-// Важно: Эта функция должна быть реализована или расширена в вашем пакете handlers
-// или общем пакете утилит API.
-func mapTournamentServiceErrorToHTTP(w http.ResponseWriter, r *http.Request, err error) {
-	// Используем errors.Is для проверки конкретных ошибок сервиса
-	switch {
-	case errors.Is(err, services.ErrTournamentNotFound):
-		notFoundResponse(w, r)
-	case errors.Is(err, services.ErrForbiddenOperation):
-		forbiddenResponse(w, r, err.Error()) // Передаем причину
-	case errors.Is(err, services.ErrTournamentNameRequired),
-		errors.Is(err, services.ErrTournamentDatesRequired),
-		errors.Is(err, services.ErrTournamentInvalidRegDate),
-		errors.Is(err, services.ErrTournamentInvalidDateRange),
-		errors.Is(err, services.ErrTournamentInvalidCapacity),
-		errors.Is(err, services.ErrTournamentInvalidStatus),
-		errors.Is(err, services.ErrTournamentInvalidStatusTransition):
-		badRequestResponse(w, r, err) // Ошибки валидации -> 400
-	case errors.Is(err, services.ErrTournamentSportNotFound),
-		errors.Is(err, services.ErrTournamentFormatNotFound),
-		errors.Is(err, services.ErrTournamentOrganizerNotFound):
-		// Ошибка из-за неверного ID зависимости - тоже 400 Bad Request или 404?
-		// 400 Bad Request кажется более подходящим, т.к. проблема во входных данных.
+func (h *TournamentHandler) UploadTournamentLogoHandler(w http.ResponseWriter, r *http.Request) {
+	tournamentID, err := getIDFromURL(r, "tournamentID")
+	if err != nil {
 		badRequestResponse(w, r, err)
-	case errors.Is(err, services.ErrTournamentNameConflict):
-		conflictResponse(w, r, err.Error()) // Конфликт имени -> 409
-	case errors.Is(err, services.ErrTournamentUpdateNotAllowed),
-		errors.Is(err, services.ErrTournamentDeletionNotAllowed):
-		// Попытка изменить/удалить в неверном состоянии -> 409 Conflict или 403 Forbidden?
-		// 409 Conflict подходит, если ресурс существует, но операция невозможна в текущем состоянии.
-		conflictResponse(w, r, err.Error())
-	case errors.Is(err, services.ErrTournamentInUse):
-		// Попытка удалить турнир, на который есть ссылки -> 409 Conflict
-		conflictResponse(w, r, err.Error())
-	default:
-		// Все остальные ошибки считаем внутренними ошибками сервера
+		return
+	}
+
+	currentUserID, err := middleware.GetUserIDFromContext(r.Context())
+	if err != nil {
+		unauthorizedResponse(w, r, "failed to identify current user for logo upload")
+		return
+	}
+
+	err = r.ParseMultipartForm(32 << 20) // 32 MB
+	if err != nil {
+		badRequestResponse(w, r, fmt.Errorf("failed to parse multipart form: %w", err))
+		return
+	}
+
+	file, header, err := r.FormFile("logo") // "logo" - имя поля в форме
+	if err != nil {
+		badRequestResponse(w, r, fmt.Errorf("failed to get logo file from form: %w", err))
+		return
+	}
+	defer file.Close()
+
+	contentType := header.Header.Get("Content-Type")
+	if contentType == "" {
+		badRequestResponse(w, r, errors.New("content-type header is required for logo"))
+		return
+	}
+
+	tournament, err := h.tournamentService.UploadTournamentLogo(r.Context(), tournamentID, currentUserID, file, contentType)
+	if err != nil {
+		mapServiceErrorToHTTP(w, r, err) // Используем общий маппер
+		return
+	}
+
+	response := jsonResponse{"tournament": tournament}
+	if err := writeJSON(w, http.StatusOK, response, nil); err != nil {
 		serverErrorResponse(w, r, err)
 	}
 }

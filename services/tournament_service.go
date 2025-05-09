@@ -4,11 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
 	"github.com/Dosada05/tournament-system/models"
 	"github.com/Dosada05/tournament-system/repositories"
+	"github.com/Dosada05/tournament-system/storage"
+)
+
+const (
+	tournamentLogoPrefix = "logos/tournaments"
 )
 
 var (
@@ -23,8 +29,8 @@ var (
 	ErrTournamentUpdateFailed       = errors.New("failed to update tournament")
 	ErrTournamentDeleteFailed       = errors.New("failed to delete tournament")
 	ErrTournamentListFailed         = errors.New("failed to list tournaments")
-	ErrTournamentUpdateNotAllowed   = errors.New("tournament update not allowed in current status") // Добавлено
-	ErrTournamentDeletionNotAllowed = errors.New("tournament deletion not allowed")                 // Переименовано/уточнено
+	ErrTournamentUpdateNotAllowed   = errors.New("tournament update not allowed in current status")
+	ErrTournamentDeletionNotAllowed = errors.New("tournament deletion not allowed")
 
 	ErrTournamentInUse = repositories.ErrTournamentInUse
 )
@@ -36,6 +42,7 @@ type TournamentService interface {
 	UpdateTournamentDetails(ctx context.Context, id int, currentUserID int, input UpdateTournamentDetailsInput) (*models.Tournament, error)
 	UpdateTournamentStatus(ctx context.Context, id int, currentUserID int, status models.TournamentStatus) (*models.Tournament, error)
 	DeleteTournament(ctx context.Context, id int, currentUserID int) error
+	UploadTournamentLogo(ctx context.Context, tournamentID int, currentUserID int, file io.Reader, contentType string) (*models.Tournament, error)
 }
 
 type CreateTournamentInput struct {
@@ -58,17 +65,15 @@ type UpdateTournamentDetailsInput struct {
 	EndDate         *time.Time `json:"end_date"`
 	Location        *string    `json:"location"`
 	MaxParticipants *int       `json:"max_participants" validate:"omitempty,gt=0"`
-	// SportID, FormatID, OrganizerID не обновляются этим методом
 }
 
-// Используется и для сервиса, и для репозитория
 type ListTournamentsFilter struct {
-	SportID     *int                     `json:"sport_id"`
-	FormatID    *int                     `json:"format_id"`
-	OrganizerID *int                     `json:"organizer_id"`
-	Status      *models.TournamentStatus `json:"status"`
-	Limit       int                      `json:"limit"`
-	Offset      int                      `json:"offset"`
+	SportID     *int
+	FormatID    *int
+	OrganizerID *int
+	Status      *models.TournamentStatus
+	Limit       int
+	Offset      int
 }
 
 type tournamentService struct {
@@ -76,6 +81,7 @@ type tournamentService struct {
 	sportRepo      repositories.SportRepository
 	formatRepo     repositories.FormatRepository
 	userRepo       repositories.UserRepository
+	uploader       storage.FileUploader
 }
 
 func NewTournamentService(
@@ -83,17 +89,33 @@ func NewTournamentService(
 	sportRepo repositories.SportRepository,
 	formatRepo repositories.FormatRepository,
 	userRepo repositories.UserRepository,
+	uploader storage.FileUploader,
 ) TournamentService {
 	return &tournamentService{
 		tournamentRepo: tournamentRepo,
 		sportRepo:      sportRepo,
 		formatRepo:     formatRepo,
 		userRepo:       userRepo,
+		uploader:       uploader,
+	}
+}
+
+func (s *tournamentService) populateTournamentLogoURL(tournament *models.Tournament) {
+	if tournament != nil && tournament.LogoKey != nil && *tournament.LogoKey != "" && s.uploader != nil {
+		url := s.uploader.GetPublicURL(*tournament.LogoKey)
+		if url != "" {
+			tournament.LogoURL = &url
+		}
+	}
+}
+
+func (s *tournamentService) populateTournamentListLogoURLs(tournaments []models.Tournament) {
+	for i := range tournaments {
+		s.populateTournamentLogoURL(&tournaments[i])
 	}
 }
 
 func (s *tournamentService) CreateTournament(ctx context.Context, organizerID int, input CreateTournamentInput) (*models.Tournament, error) {
-	// 1. Валидация ввода
 	name := strings.TrimSpace(input.Name)
 	if name == "" {
 		return nil, ErrTournamentNameRequired
@@ -105,7 +127,6 @@ func (s *tournamentService) CreateTournament(ctx context.Context, organizerID in
 		return nil, ErrTournamentInvalidCapacity
 	}
 
-	// 2. Валидация внешних сущностей
 	var validationErr error
 	_, validationErr = s.sportRepo.GetByID(ctx, input.SportID)
 	if validationErr != nil {
@@ -121,7 +142,6 @@ func (s *tournamentService) CreateTournament(ctx context.Context, organizerID in
 		}
 		return nil, fmt.Errorf("failed to verify format %d: %w", input.FormatID, validationErr)
 	}
-	// Проверяем переданный organizerID
 	_, validationErr = s.userRepo.GetByID(ctx, organizerID)
 	if validationErr != nil {
 		if errors.Is(validationErr, repositories.ErrUserNotFound) {
@@ -130,28 +150,25 @@ func (s *tournamentService) CreateTournament(ctx context.Context, organizerID in
 		return nil, fmt.Errorf("failed to verify organizer %d: %w", organizerID, validationErr)
 	}
 
-	// 3. Создание модели
 	tournament := &models.Tournament{
 		Name:            name,
 		Description:     input.Description,
 		SportID:         input.SportID,
 		FormatID:        input.FormatID,
-		OrganizerID:     organizerID, // Используем параметр метода
+		OrganizerID:     organizerID,
 		RegDate:         input.RegDate,
 		StartDate:       input.StartDate,
 		EndDate:         input.EndDate,
 		Location:        input.Location,
 		MaxParticipants: input.MaxParticipants,
-		Status:          models.StatusSoon, // Устанавливаем начальный статус
+		Status:          models.StatusSoon,
 	}
 
-	// 4. Вызов репозитория
 	err := s.tournamentRepo.Create(ctx, tournament)
 	if err != nil {
 		if errors.Is(err, repositories.ErrTournamentNameConflict) {
 			return nil, ErrTournamentNameConflict
 		}
-		// Обработка FK ошибок от БД (маловероятно, т.к. проверили выше, но для полноты)
 		if errors.Is(err, repositories.ErrTournamentInvalidSport) {
 			return nil, ErrTournamentSportNotFound
 		}
@@ -163,7 +180,7 @@ func (s *tournamentService) CreateTournament(ctx context.Context, organizerID in
 		}
 		return nil, fmt.Errorf("%w: %w", ErrTournamentCreationFailed, err)
 	}
-
+	s.populateTournamentLogoURL(tournament)
 	return tournament, nil
 }
 
@@ -175,27 +192,31 @@ func (s *tournamentService) GetTournamentByID(ctx context.Context, id int) (*mod
 		}
 		return nil, fmt.Errorf("failed to get tournament by id %d: %w", id, err)
 	}
-	// Опционально: загрузить связанные сущности (Sport, Format, Organizer)
+	s.populateTournamentLogoURL(tournament)
 	return tournament, nil
 }
 
 func (s *tournamentService) ListTournaments(ctx context.Context, filter ListTournamentsFilter) ([]models.Tournament, error) {
-	// Передаем фильтр напрямую, т.к. структура идентична
-	tournaments, err := s.tournamentRepo.List(ctx, repositories.ListTournamentsFilter(filter))
+	repoFilter := repositories.ListTournamentsFilter{
+		SportID:     filter.SportID,
+		FormatID:    filter.FormatID,
+		OrganizerID: filter.OrganizerID,
+		Status:      filter.Status,
+		Limit:       filter.Limit,
+		Offset:      filter.Offset,
+	}
+	tournaments, err := s.tournamentRepo.List(ctx, repoFilter)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrTournamentListFailed, err)
 	}
-	// Репозиторий должен возвращать пустой слайс, а не nil, но на всякий случай проверим
 	if tournaments == nil {
 		return []models.Tournament{}, nil
 	}
-	// Опционально: обогатить турниры связанными данными (Sport, Format...)
+	s.populateTournamentListLogoURLs(tournaments)
 	return tournaments, nil
 }
 
-// Добавлен параметр currentUserID для авторизации
 func (s *tournamentService) UpdateTournamentDetails(ctx context.Context, id int, currentUserID int, input UpdateTournamentDetailsInput) (*models.Tournament, error) {
-	// 1. Получаем турнир
 	tournament, err := s.tournamentRepo.GetByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, repositories.ErrTournamentNotFound) {
@@ -204,19 +225,15 @@ func (s *tournamentService) UpdateTournamentDetails(ctx context.Context, id int,
 		return nil, fmt.Errorf("failed to get tournament %d for update: %w", id, err)
 	}
 
-	// 2. Авторизация
 	if tournament.OrganizerID != currentUserID {
 		return nil, ErrForbiddenOperation
 	}
 
-	// 3. Проверка статуса (можно ли обновлять?)
 	if tournament.Status != models.StatusSoon && tournament.Status != models.StatusRegistration {
-		// Разрешаем обновление только до начала активной фазы
 		return nil, fmt.Errorf("%w: cannot update tournament in status '%s'", ErrTournamentUpdateNotAllowed, tournament.Status)
 	}
 
 	updated := false
-	// 4. Применение изменений
 	if input.Name != nil {
 		trimmedName := strings.TrimSpace(*input.Name)
 		if trimmedName == "" {
@@ -227,7 +244,6 @@ func (s *tournamentService) UpdateTournamentDetails(ctx context.Context, id int,
 			updated = true
 		}
 	}
-	// Сравнение указателей Description
 	if input.Description != nil && derefString(input.Description) != derefString(tournament.Description) {
 		tournament.Description = input.Description
 		updated = true
@@ -244,7 +260,6 @@ func (s *tournamentService) UpdateTournamentDetails(ctx context.Context, id int,
 		tournament.EndDate = *input.EndDate
 		updated = true
 	}
-	// Сравнение указателей Location
 	if input.Location != nil && derefString(input.Location) != derefString(tournament.Location) {
 		tournament.Location = input.Location
 		updated = true
@@ -257,19 +272,17 @@ func (s *tournamentService) UpdateTournamentDetails(ctx context.Context, id int,
 		updated = true
 	}
 
-	// 5. Перепроверка дат, если они менялись
-	if updated { // Проверяем только если были изменения
+	if updated {
 		if err := validateTournamentDates(tournament.RegDate, tournament.StartDate, tournament.EndDate); err != nil {
-			return nil, err // Используем ошибки из validateTournamentDates
+			return nil, err
 		}
 	}
 
-	// 6. Если не было изменений
 	if !updated {
+		s.populateTournamentLogoURL(tournament)
 		return tournament, nil
 	}
 
-	// 7. Вызов репозитория
 	err = s.tournamentRepo.Update(ctx, tournament)
 	if err != nil {
 		if errors.Is(err, repositories.ErrTournamentNameConflict) {
@@ -277,22 +290,18 @@ func (s *tournamentService) UpdateTournamentDetails(ctx context.Context, id int,
 		}
 		if errors.Is(err, repositories.ErrTournamentNotFound) {
 			return nil, ErrTournamentNotFound
-		} // Удален между Get и Update?
-		// Обработка FK ошибок (если бы SportID/FormatID/OrganizerID обновлялись)
+		}
 		return nil, fmt.Errorf("%w: %w", ErrTournamentUpdateFailed, err)
 	}
-
+	s.populateTournamentLogoURL(tournament)
 	return tournament, nil
 }
 
-// Добавлен параметр currentUserID для авторизации
 func (s *tournamentService) UpdateTournamentStatus(ctx context.Context, id int, currentUserID int, newStatus models.TournamentStatus) (*models.Tournament, error) {
-	// 1. Валидация значения статуса
 	if !isValidTournamentStatus(newStatus) {
 		return nil, fmt.Errorf("%w: '%s'", ErrTournamentInvalidStatus, newStatus)
 	}
 
-	// 2. Получаем турнир
 	tournament, err := s.tournamentRepo.GetByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, repositories.ErrTournamentNotFound) {
@@ -301,43 +310,36 @@ func (s *tournamentService) UpdateTournamentStatus(ctx context.Context, id int, 
 		return nil, fmt.Errorf("failed to get tournament %d for status update: %w", id, err)
 	}
 
-	// 3. Авторизация
 	if tournament.OrganizerID != currentUserID {
 		return nil, ErrForbiddenOperation
 	}
 
-	// 4. Валидация перехода
 	if !isValidStatusTransition(tournament.Status, newStatus) {
 		return nil, fmt.Errorf("%w: from '%s' to '%s'", ErrTournamentInvalidStatusTransition, tournament.Status, newStatus)
 	}
 
-	// 5. Вызов репозитория
 	err = s.tournamentRepo.UpdateStatus(ctx, id, newStatus)
 	if err != nil {
 		if errors.Is(err, repositories.ErrTournamentNotFound) {
 			return nil, ErrTournamentNotFound
-		} // Удален?
-		// UpdateStatus обычно не вызывает конфликтов или FK ошибок
+		}
 		return nil, fmt.Errorf("%w: failed to update status in repository: %w", ErrTournamentUpdateFailed, err)
 	}
 
-	// 6. Обновляем статус в объекте и возвращаем
 	tournament.Status = newStatus
+	s.populateTournamentLogoURL(tournament)
 	return tournament, nil
 }
 
-// Добавлен параметр currentUserID для авторизации
 func (s *tournamentService) DeleteTournament(ctx context.Context, id int, currentUserID int) error {
-	// 1. Получаем турнир для проверок
 	tournament, err := s.tournamentRepo.GetByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, repositories.ErrTournamentNotFound) {
 			return ErrTournamentNotFound
-		} // Уже удален
+		}
 		return fmt.Errorf("failed to get tournament %d for deletion check: %w", id, err)
 	}
 
-	// 2. Авторизация
 	if tournament.OrganizerID != currentUserID {
 		return ErrForbiddenOperation
 	}
@@ -346,21 +348,91 @@ func (s *tournamentService) DeleteTournament(ctx context.Context, id int, curren
 		return fmt.Errorf("%w: cannot delete tournament with status '%s'", ErrTournamentDeletionNotAllowed, tournament.Status)
 	}
 
-	// 4. Вызов репозитория
+	oldLogoKey := tournament.LogoKey
+
 	err = s.tournamentRepo.Delete(ctx, id)
 	if err != nil {
 		if errors.Is(err, repositories.ErrTournamentNotFound) {
 			return ErrTournamentNotFound
-		} // Уже удален
-		// Обрабатываем ошибку FK constraint violation (ErrTournamentInUse)
+		}
 		if errors.Is(err, repositories.ErrTournamentInUse) {
-			// Можно вернуть более специфичную ошибку, если нужно знать причину (участники или матчи)
 			return fmt.Errorf("%w: tournament might have participants or matches", ErrTournamentDeletionNotAllowed)
 		}
 		return fmt.Errorf("%w: %w", ErrTournamentDeleteFailed, err)
 	}
 
+	if oldLogoKey != nil && *oldLogoKey != "" && s.uploader != nil {
+		go func(keyToDelete string) {
+			deleteCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if deleteErr := s.uploader.Delete(deleteCtx, keyToDelete); deleteErr != nil {
+				fmt.Printf("Warning: Failed to delete tournament logo %s during tournament deletion: %v\n", keyToDelete, deleteErr)
+			}
+		}(*oldLogoKey)
+	}
+
 	return nil
+}
+
+func (s *tournamentService) UploadTournamentLogo(ctx context.Context, tournamentID int, currentUserID int, file io.Reader, contentType string) (*models.Tournament, error) {
+	tournament, err := s.tournamentRepo.GetByID(ctx, tournamentID)
+	if err != nil {
+		if errors.Is(err, repositories.ErrTournamentNotFound) {
+			return nil, ErrTournamentNotFound
+		}
+		return nil, fmt.Errorf("failed to get tournament %d for logo upload: %w", tournamentID, err)
+	}
+
+	if tournament.OrganizerID != currentUserID {
+		return nil, ErrForbiddenOperation
+	}
+
+	if !strings.HasPrefix(contentType, "image/") {
+		return nil, ErrInvalidLogoFormat
+	}
+
+	if s.uploader == nil {
+		return nil, errors.New("file uploader is not configured")
+	}
+
+	oldLogoKey := tournament.LogoKey
+
+	ext, err := GetExtensionFromContentType(contentType) // Используем общую функцию
+	if err != nil {
+		return nil, err
+	}
+
+	newKey := fmt.Sprintf("%s/%d/logo_%d%s", tournamentLogoPrefix, tournamentID, time.Now().UnixNano(), ext)
+
+	_, err = s.uploader.Upload(ctx, newKey, contentType, file)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrLogoUploadFailed, newKey, err)
+	}
+
+	err = s.tournamentRepo.UpdateLogoKey(ctx, tournamentID, &newKey)
+	if err != nil {
+		if deleteErr := s.uploader.Delete(context.Background(), newKey); deleteErr != nil {
+			fmt.Printf("CRITICAL: Failed to delete uploaded tournament logo %s after DB update error: %v. DB error: %v\n", newKey, deleteErr, err)
+		}
+		if errors.Is(err, repositories.ErrTournamentNotFound) {
+			return nil, ErrTournamentNotFound
+		}
+		return nil, fmt.Errorf("%w: %w", ErrLogoUpdateDatabaseFailed, err)
+	}
+
+	if oldLogoKey != nil && *oldLogoKey != "" && *oldLogoKey != newKey {
+		go func(keyToDelete string) {
+			deleteCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if deleteErr := s.uploader.Delete(deleteCtx, keyToDelete); deleteErr != nil {
+				fmt.Printf("Warning: Failed to delete old tournament logo %s: %v\n", keyToDelete, deleteErr)
+			}
+		}(*oldLogoKey)
+	}
+
+	tournament.LogoKey = &newKey
+	s.populateTournamentLogoURL(tournament)
+	return tournament, nil
 }
 
 func isValidTournamentStatus(status models.TournamentStatus) bool {
@@ -372,47 +444,42 @@ func isValidTournamentStatus(status models.TournamentStatus) bool {
 	}
 }
 
-// isValidStatusTransition определяет допустимые переходы между статусами
 func isValidStatusTransition(current, next models.TournamentStatus) bool {
 	if current == next {
-		return true // Разрешаем "обновление" на тот же статус
+		return true
 	}
-
-	// Карта разрешенных переходов
 	allowedTransitions := map[models.TournamentStatus][]models.TournamentStatus{
 		models.StatusSoon:         {models.StatusRegistration, models.StatusCanceled},
-		models.StatusRegistration: {models.StatusActive, models.StatusCanceled}, // Можно добавить Soon?
+		models.StatusRegistration: {models.StatusActive, models.StatusCanceled},
 		models.StatusActive:       {models.StatusCompleted, models.StatusCanceled},
-		models.StatusCompleted:    {}, // Нельзя выйти из Completed
-		models.StatusCanceled:     {}, // Нельзя выйти из Canceled
+		models.StatusCompleted:    {},
+		models.StatusCanceled:     {},
 	}
-
 	allowed, ok := allowedTransitions[current]
 	if !ok {
-		return false // Неизвестный текущий статус
+		return false
 	}
 	for _, nextAllowed := range allowed {
 		if next == nextAllowed {
 			return true
 		}
 	}
-	return false // Переход не найден в списке разрешенных
+	return false
 }
 
 func validateTournamentDates(reg, start, end time.Time) error {
 	if reg.IsZero() || start.IsZero() || end.IsZero() {
 		return ErrTournamentDatesRequired
 	}
-	if reg.After(start) { // reg > start
+	if reg.After(start) {
 		return fmt.Errorf("%w: registration date (%s) cannot be after start date (%s)", ErrTournamentInvalidRegDate, reg.Format(time.DateOnly), start.Format(time.DateOnly))
 	}
-	if !start.Before(end) { // start >= end
+	if !start.Before(end) {
 		return fmt.Errorf("%w: start date (%s) must be before end date (%s)", ErrTournamentInvalidDateRange, start.Format(time.DateOnly), end.Format(time.DateOnly))
 	}
 	return nil
 }
 
-// derefString безопасно разыменовывает *string, возвращая "" если указатель nil
 func derefString(s *string) string {
 	if s == nil {
 		return ""

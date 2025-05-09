@@ -11,10 +11,11 @@ import (
 )
 
 var (
-	ErrUserNotFound         = errors.New("user not found")
-	ErrUserEmailConflict    = errors.New("user email conflict")
-	ErrUserNicknameConflict = errors.New("user nickname conflict") // <--- ДОБАВЛЕНО ЗДЕСЬ
-	ErrUserTeamInvalid      = errors.New("user team conflict or invalid")
+	ErrUserNotFound            = errors.New("user not found")
+	ErrUserEmailConflict       = errors.New("user email conflict")
+	ErrUserNicknameConflict    = errors.New("user nickname conflict")
+	ErrUserTeamInvalid         = errors.New("user team conflict or invalid")
+	ErrUserUpdateLogoKeyFailed = errors.New("failed to update user logo key")
 )
 
 type UserRepository interface {
@@ -22,9 +23,9 @@ type UserRepository interface {
 	GetByID(ctx context.Context, id int) (*models.User, error)
 	GetByEmail(ctx context.Context, email string) (*models.User, error)
 	Update(ctx context.Context, user *models.User) error
+	UpdateLogoKey(ctx context.Context, userID int, logoKey string) error
 	Delete(ctx context.Context, id int) error
 	ListByTeamID(ctx context.Context, teamID int) ([]models.User, error)
-	// ListUsers (возможно, с пагинацией и фильтрами) - можно добавить позже
 }
 
 type postgresUserRepository struct {
@@ -37,10 +38,9 @@ func NewPostgresUserRepository(db *sql.DB) UserRepository {
 
 func (r *postgresUserRepository) Create(ctx context.Context, user *models.User) error {
 	query := `
-		INSERT INTO users (first_name, last_name, nickname, email, password_hash, role, team_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO users (first_name, last_name, nickname, email, password_hash, role, team_id, logo_key)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		RETURNING id, created_at`
-
 	err := r.db.QueryRowContext(ctx, query,
 		user.FirstName,
 		user.LastName,
@@ -49,27 +49,10 @@ func (r *postgresUserRepository) Create(ctx context.Context, user *models.User) 
 		user.PasswordHash,
 		user.Role,
 		user.TeamID,
+		user.LogoKey,
 	).Scan(&user.ID, &user.CreatedAt)
-
 	if err != nil {
-		if pqErr, ok := err.(*pq.Error); ok {
-			switch pqErr.Code {
-			case "23505": // unique_violation
-				// ЗАМЕНИТЕ имена constraint на реальные из вашей схемы!
-				if pqErr.Constraint == "users_email_key" {
-					return ErrUserEmailConflict
-				}
-				if pqErr.Constraint == "users_nickname_key" {
-					return ErrUserNicknameConflict // <--- ИСПОЛЬЗУЕТСЯ ЗДЕСЬ
-				}
-			case "23503": // foreign_key_violation
-				// ЗАМЕНИТЕ имя constraint на реальное из вашей схемы!
-				if pqErr.Constraint == "users_team_id_fkey" {
-					return ErrUserTeamInvalid
-				}
-			}
-		}
-		return err
+		return mapPQError(err)
 	}
 	return nil
 }
@@ -77,26 +60,22 @@ func (r *postgresUserRepository) Create(ctx context.Context, user *models.User) 
 func (r *postgresUserRepository) GetByID(ctx context.Context, id int) (*models.User, error) {
 	query := `
 		SELECT
-			u.id, u.first_name, u.last_name, u.nickname, u.email, u.password_hash, u.role, u.team_id, u.created_at,
-			t.id, t.name, t.captain_id, t.sport_id, t.created_at
-		FROM
-			users u
-		LEFT JOIN
-			teams t ON u.team_id = t.id
-		WHERE
-			u.id = $1`
-
+			u.id, u.first_name, u.last_name, u.nickname, u.email, u.password_hash, u.role, u.team_id, u.logo_key, u.created_at,
+			t.id, t.name, t.captain_id, t.sport_id, t.logo_key, t.created_at
+		FROM users u
+		LEFT JOIN teams t ON u.team_id = t.id
+		WHERE u.id = $1`
 	row := r.db.QueryRowContext(ctx, query, id)
-
 	var user models.User
 	var team models.Team
-
-	var teamID sql.NullInt64
-	var teamName sql.NullString
-	var teamCaptainID sql.NullInt64
-	var teamSportID sql.NullInt64
-	var teamCreatedAt sql.NullTime
-
+	var (
+		teamID        sql.NullInt64
+		teamName      sql.NullString
+		teamCaptainID sql.NullInt64
+		teamSportID   sql.NullInt64
+		teamLogoKey   sql.NullString
+		teamCreatedAt sql.NullTime
+	)
 	err := row.Scan(
 		&user.ID,
 		&user.FirstName,
@@ -106,48 +85,41 @@ func (r *postgresUserRepository) GetByID(ctx context.Context, id int) (*models.U
 		&user.PasswordHash,
 		&user.Role,
 		&user.TeamID,
+		&user.LogoKey,
 		&user.CreatedAt,
-		// Поля команды (могут быть NULL)
 		&teamID,
 		&teamName,
 		&teamCaptainID,
 		&teamSportID,
+		&teamLogoKey,
 		&teamCreatedAt,
 	)
-
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrUserNotFound
 		}
 		return nil, fmt.Errorf("failed to scan user with team: %w", err)
 	}
-
 	if teamID.Valid {
 		team.ID = int(teamID.Int64)
 		team.Name = teamName.String
 		team.CaptainID = int(teamCaptainID.Int64)
 		team.SportID = int(teamSportID.Int64)
+		if teamLogoKey.Valid {
+			team.LogoKey = &teamLogoKey.String
+		}
 		team.CreatedAt = teamCreatedAt.Time
 		user.Team = &team
 	}
-
 	return &user, nil
 }
 
-//func (r *postgresUserRepository) GetByID(ctx context.Context, id int) (*models.User, error) {
-//	query := `
-//		SELECT id, first_name, last_name, nickname, email, password_hash, role, team_id, created_at
-//		FROM users
-//		WHERE id = $1`
-//	return r.scanUser(ctx, query, id)
-//}
-
 func (r *postgresUserRepository) GetByEmail(ctx context.Context, email string) (*models.User, error) {
 	query := `
-		SELECT id, first_name, last_name, nickname, email, password_hash, role, team_id, created_at
+		SELECT id, first_name, last_name, nickname, email, password_hash, role, team_id, logo_key, created_at
 		FROM users
 		WHERE email = $1`
-	return r.scanUser(ctx, query, email)
+	return scanUserRow(ctx, r.db, query, email)
 }
 
 func (r *postgresUserRepository) Update(ctx context.Context, user *models.User) error {
@@ -159,9 +131,9 @@ func (r *postgresUserRepository) Update(ctx context.Context, user *models.User) 
 			email = $4,
 			password_hash = $5,
 			role = $6,
-			team_id = $7
-		WHERE id = $8`
-
+			team_id = $7,
+			logo_key = $8
+		WHERE id = $9`
 	result, err := r.db.ExecContext(ctx, query,
 		user.FirstName,
 		user.LastName,
@@ -170,82 +142,69 @@ func (r *postgresUserRepository) Update(ctx context.Context, user *models.User) 
 		user.PasswordHash,
 		user.Role,
 		user.TeamID,
+		user.LogoKey,
 		user.ID,
 	)
-
 	if err != nil {
-		if pqErr, ok := err.(*pq.Error); ok {
-			switch pqErr.Code {
-			case "23505":
-				if pqErr.Constraint == "users_email_key" {
-					return ErrUserEmailConflict
-				}
-				if pqErr.Constraint == "users_nickname_key" {
-					return ErrUserNicknameConflict // <--- ИСПОЛЬЗУЕТСЯ ЗДЕСЬ
-				}
-			case "23503":
-				if pqErr.Constraint == "users_team_id_fkey" {
-					return ErrUserTeamInvalid
-				}
-			}
-		}
+		return mapPQError(err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
 		return err
 	}
-
-	rowsAffected, checkErr := checkRowsAffected(result) // Используем общий хелпер
-	if checkErr != nil {
-		return checkErr
-	}
-	if rowsAffected == 0 {
+	if rows == 0 {
 		return ErrUserNotFound
 	}
+	return nil
+}
 
+func (r *postgresUserRepository) UpdateLogoKey(ctx context.Context, userID int, logoKey string) error {
+	query := `UPDATE users SET logo_key = $1 WHERE id = $2`
+	result, err := r.db.ExecContext(ctx, query, logoKey, userID)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrUserUpdateLogoKeyFailed, err)
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("%w: failed to check affected rows: %w", ErrUserUpdateLogoKeyFailed, err)
+	}
+	if rows == 0 {
+		return ErrUserNotFound
+	}
 	return nil
 }
 
 func (r *postgresUserRepository) Delete(ctx context.Context, id int) error {
-	// Подумать о логике: что происходит с командами/участниками/матчами при удалении пользователя?
-	// Возможно, потребуется мягкое удаление или проверка зависимостей в сервисном слое.
-	// Пока реализуем простое удаление.
 	query := `DELETE FROM users WHERE id = $1`
 	result, err := r.db.ExecContext(ctx, query, id)
 	if err != nil {
-		// Ошибка FK может возникнуть, если пользователь является организатором турнира
-		// или если нет каскадного удаления для связанных сущностей.
-		// Обработка pqErr.Code == "23503" может быть добавлена здесь при необходимости.
 		return err
 	}
-
-	rowsAffected, checkErr := checkRowsAffected(result)
-	if checkErr != nil {
-		return checkErr
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
 	}
-	if rowsAffected == 0 {
+	if rows == 0 {
 		return ErrUserNotFound
 	}
-
 	return nil
 }
 
-// ListByTeamID возвращает список пользователей, принадлежащих к указанной команде.
 func (r *postgresUserRepository) ListByTeamID(ctx context.Context, teamID int) ([]models.User, error) {
 	query := `
-		SELECT id, first_name, last_name, nickname, email, password_hash, role, team_id, created_at
+		SELECT id, first_name, last_name, nickname, email, password_hash, role, team_id, logo_key, created_at
 		FROM users
 		WHERE team_id = $1
 		ORDER BY nickname ASC`
-
 	rows, err := r.db.QueryContext(ctx, query, teamID)
 	if err != nil {
-		return nil, err // Ошибка выполнения запроса
+		return nil, err
 	}
-	defer rows.Close() // Гарантируем закрытие курсора
-
-	users := make([]models.User, 0) // Инициализируем пустой слайс
+	defer rows.Close()
+	var users []models.User
 	for rows.Next() {
 		var user models.User
-		// Сканируем все поля, включая team_id (который является *int в модели)
-		scanErr := rows.Scan(
+		err := rows.Scan(
 			&user.ID,
 			&user.FirstName,
 			&user.LastName,
@@ -253,28 +212,24 @@ func (r *postgresUserRepository) ListByTeamID(ctx context.Context, teamID int) (
 			&user.Email,
 			&user.PasswordHash,
 			&user.Role,
-			&user.TeamID, // Сканируем в указатель *int
+			&user.TeamID,
+			&user.LogoKey,
 			&user.CreatedAt,
 		)
-		if scanErr != nil {
-			return nil, scanErr // Ошибка при сканировании строки
+		if err != nil {
+			return nil, err
 		}
 		users = append(users, user)
 	}
-
-	// Проверяем ошибки, возникшие во время итерации
 	if err = rows.Err(); err != nil {
 		return nil, err
 	}
-
-	// Возвращаем слайс пользователей (может быть пустым, если команда пуста)
 	return users, nil
 }
 
-// scanUser - вспомогательный метод для сканирования одного пользователя
-func (r *postgresUserRepository) scanUser(ctx context.Context, query string, args ...interface{}) (*models.User, error) {
+func scanUserRow(ctx context.Context, db *sql.DB, query string, args ...interface{}) (*models.User, error) {
 	user := &models.User{}
-	err := r.db.QueryRowContext(ctx, query, args...).Scan(
+	err := db.QueryRowContext(ctx, query, args...).Scan(
 		&user.ID,
 		&user.FirstName,
 		&user.LastName,
@@ -283,6 +238,7 @@ func (r *postgresUserRepository) scanUser(ctx context.Context, query string, arg
 		&user.PasswordHash,
 		&user.Role,
 		&user.TeamID,
+		&user.LogoKey,
 		&user.CreatedAt,
 	)
 	if err != nil {
@@ -292,4 +248,23 @@ func (r *postgresUserRepository) scanUser(ctx context.Context, query string, arg
 		return nil, err
 	}
 	return user, nil
+}
+
+func mapPQError(err error) error {
+	if pqErr, ok := err.(*pq.Error); ok {
+		switch pqErr.Code {
+		case "23505":
+			if pqErr.Constraint == "users_email_key" {
+				return ErrUserEmailConflict
+			}
+			if pqErr.Constraint == "users_nickname_key" {
+				return ErrUserNicknameConflict
+			}
+		case "23503":
+			if pqErr.Constraint == "users_team_id_fkey" {
+				return ErrUserTeamInvalid
+			}
+		}
+	}
+	return err
 }

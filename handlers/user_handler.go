@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"strconv"
 
@@ -23,6 +22,16 @@ func NewUserHandler(us services.UserService) *UserHandler {
 	}
 }
 
+// GetUserByID godoc
+// @Summary Получить пользователя по ID
+// @Tags users
+// @Description Возвращает публичный профиль пользователя по его идентификатору
+// @Produce json
+// @Param id path int true "User ID"
+// @Success 200 {object} map[string]interface{} "Пользователь найден"
+// @Failure 400 {object} map[string]string "Некорректный ID"
+// @Failure 404 {object} map[string]string "Пользователь не найден"
+// @Router /users/{id} [get]
 func (h *UserHandler) GetUserByID(w http.ResponseWriter, r *http.Request) {
 	requestedUserID, err := getUserIDFromURL(r)
 	if err != nil {
@@ -48,6 +57,21 @@ func (h *UserHandler) GetUserByID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// UpdateUserByID godoc
+// @Summary Обновить профиль пользователя
+// @Tags users
+// @Description Обновляет профиль пользователя. Доступно самому пользователю или админу.
+// @Accept json
+// @Produce json
+// @Param id path int true "User ID"
+// @Param body body services.UpdateProfileInput true "Данные для обновления профиля"
+// @Success 200 {object} map[string]interface{} "Профиль обновлён"
+// @Failure 400 {object} map[string]string "Ошибка валидации"
+// @Failure 401 {object} map[string]string "Неавторизован"
+// @Failure 403 {object} map[string]string "Нет прав"
+// @Failure 404 {object} map[string]string "Пользователь не найден"
+// @Security BearerAuth
+// @Router /users/{id} [put]
 func (h *UserHandler) UpdateUserByID(w http.ResponseWriter, r *http.Request) {
 	requestedUserID, err := getUserIDFromURL(r)
 	if err != nil {
@@ -80,7 +104,7 @@ func (h *UserHandler) UpdateUserByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if input.FirstName == nil && input.LastName == nil && input.Nickname == nil {
+	if input.FirstName == nil && input.LastName == nil && input.Nickname == nil && input.Email == nil && input.Password == nil {
 		badRequestResponse(w, r, errors.New("no fields provided for update"))
 		return
 	}
@@ -103,6 +127,70 @@ func (h *UserHandler) UpdateUserByID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// UploadUserLogo godoc
+// @Summary Загрузить аватар пользователя
+// @Tags users
+// @Description Загружает или обновляет аватар для пользователя (multipart/form-data).
+// @Accept multipart/form-data
+// @Produce json
+// @Param id path int true "User ID"
+// @Param avatar formData file true "Файл аватара"
+// @Success 200 {object} map[string]interface{} "Аватар обновлён"
+// @Failure 400 {object} map[string]string "Ошибка загрузки файла"
+// @Failure 401 {object} map[string]string "Неавторизован"
+// @Failure 403 {object} map[string]string "Нет прав"
+// @Failure 404 {object} map[string]string "Пользователь не найден"
+// @Security BearerAuth
+// @Router /users/{id}/avatar [post]
+func (h *UserHandler) UploadUserLogo(w http.ResponseWriter, r *http.Request) {
+	requestedUserID, err := getUserIDFromURL(r)
+	if err != nil {
+		badRequestResponse(w, r, err)
+		return
+	}
+
+	currentUserID, err := middleware.GetUserIDFromContext(r.Context())
+	if err != nil {
+		unauthorizedResponse(w, r, "failed to identify current user")
+		return
+	}
+
+	if requestedUserID != currentUserID {
+		forbiddenResponse(w, r, "operation not allowed for the current user")
+		return
+	}
+
+	file, header, err := r.FormFile("avatar")
+	if err != nil {
+		badRequestResponse(w, r, err)
+		return
+	}
+	defer file.Close()
+
+	contentType := header.Header.Get("Content-Type")
+	if contentType == "" {
+		badRequestResponse(w, r, errors.New("content type required"))
+		return
+	}
+
+	user, err := h.userService.UpdateUserLogo(r.Context(), requestedUserID, currentUserID, file, contentType)
+	if err != nil {
+		mapServiceErrorToHTTP(w, r, err)
+		return
+	}
+
+	user.PasswordHash = ""
+
+	response := jsonResponse{
+		"user": user,
+	}
+
+	err = writeJSON(w, http.StatusOK, response, nil)
+	if err != nil {
+		serverErrorResponse(w, r, err)
+	}
+}
+
 func getUserIDFromURL(r *http.Request) (int, error) {
 	idStr := chi.URLParam(r, "id")
 	if idStr == "" {
@@ -111,11 +199,11 @@ func getUserIDFromURL(r *http.Request) (int, error) {
 
 	userID, err := strconv.Atoi(idStr)
 	if err != nil {
-		return 0, fmt.Errorf("invalid user ID format: %q", idStr)
+		return 0, errors.New("invalid user ID format")
 	}
 
 	if userID <= 0 {
-		return 0, fmt.Errorf("invalid user ID value: %d", userID)
+		return 0, errors.New("invalid user ID value")
 	}
 
 	return userID, nil

@@ -28,6 +28,8 @@ type Tournament struct {
 	Status          TournamentStatus `json:"status" db:"status"`
 	MaxParticipants int              `json:"max_participants" db:"max_participants"`
 	CreatedAt       time.Time        `json:"created_at" db:"created_at"`
+	LogoKey         *string          `json:"-" db:"logo_key"`
+	LogoURL         *string          `json:"logo_url,omitempty" db:"-"`
 
 	// Опциональные связанные сущности (не мапятся напрямую)
 	Sport        *Sport        `json:"sport,omitempty" db:"-"`
