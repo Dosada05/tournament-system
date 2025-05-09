@@ -4,20 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/Dosada05/tournament-system/config"
 	"github.com/Dosada05/tournament-system/db"
+	"github.com/Dosada05/tournament-system/handlers"
+	"github.com/Dosada05/tournament-system/repositories"
 	api "github.com/Dosada05/tournament-system/routes"
+	"github.com/Dosada05/tournament-system/services"
+	"github.com/Dosada05/tournament-system/storage"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
-
-	"github.com/Dosada05/tournament-system/config"
-	_ "github.com/Dosada05/tournament-system/db"
-	"github.com/Dosada05/tournament-system/handlers"
-	"github.com/Dosada05/tournament-system/repositories"
-	"github.com/Dosada05/tournament-system/services"
 
 	"github.com/go-chi/chi/v5"
 	_ "github.com/lib/pq"
@@ -34,13 +33,13 @@ func main() {
 
 	logger.Info("configuration loaded", slog.Int("port", cfg.ServerPort))
 
-	db, err := db.Connect(cfg.DatabaseURL, 5*time.Second)
+	dbConn, err := db.Connect(cfg.DatabaseURL, 5*time.Second)
 	if err != nil {
 		logger.Error("failed to connect to database", slog.Any("error", err))
 		os.Exit(1)
 	}
 	defer func() {
-		if err := db.Close(); err != nil {
+		if err := dbConn.Close(); err != nil {
 			logger.Error("failed to close database connection", slog.Any("error", err))
 		} else {
 			logger.Info("database connection closed")
@@ -49,30 +48,37 @@ func main() {
 
 	logger.Info("database connection established")
 
-	userRepo := repositories.NewPostgresUserRepository(db)
-	teamRepo := repositories.NewPostgresTeamRepository(db)
-	sportRepo := repositories.NewPostgresSportRepository(db)
-	formatRepo := repositories.NewPostgresFormatRepository(db)
-	tournamentRepo := repositories.NewPostgresTournamentRepository(db)
-	//participantRepo := repositories.NewPostgresParticipantRepository(db)
-	inviteRepo := repositories.NewPostgresInviteRepository(db)
+	userRepo := repositories.NewPostgresUserRepository(dbConn)
+	teamRepo := repositories.NewPostgresTeamRepository(dbConn)
+	sportRepo := repositories.NewPostgresSportRepository(dbConn)
+	formatRepo := repositories.NewPostgresFormatRepository(dbConn)
+	tournamentRepo := repositories.NewPostgresTournamentRepository(dbConn)
+	inviteRepo := repositories.NewPostgresInviteRepository(dbConn)
+
+	cloudflareUploader, err := storage.NewCloudflareR2Uploader(storage.CloudflareR2UploaderConfig{
+		AccountID:       cfg.R2AccountID,
+		AccessKeyID:     cfg.R2AccessKeyID,
+		SecretAccessKey: cfg.R2SecretAccessKey,
+		BucketName:      cfg.R2BucketName,
+		PublicBaseURL:   cfg.R2PublicBaseURL,
+	})
+	if err != nil {
+		logger.Error("failed to initialize Cloudflare R2 uploader", slog.Any("error", err))
+		os.Exit(1)
+	}
 
 	authService := services.NewAuthService(userRepo)
-	userService := services.NewUserService(userRepo)
-	sportService := services.NewSportService(sportRepo)
-	//formatService := services.NewFormatService(formatRepo)
-	teamService := services.NewTeamService(teamRepo, userRepo, sportRepo)
+	userService := services.NewUserService(userRepo, cloudflareUploader)
+	sportService := services.NewSportService(sportRepo, userRepo, cloudflareUploader)
+	teamService := services.NewTeamService(teamRepo, userRepo, sportRepo, cloudflareUploader)
 	inviteService := services.NewInviteService(inviteRepo, teamRepo, userRepo)
-	//participantService := services.NewParticipantService(participantRepo, tournamentRepo, userRepo, teamRepo)
-	tournamentService := services.NewTournamentService(tournamentRepo, sportRepo, formatRepo, userRepo)
+	tournamentService := services.NewTournamentService(tournamentRepo, sportRepo, formatRepo, userRepo, cloudflareUploader)
 
 	authHandler := handlers.NewAuthHandler(authService, cfg.JWTSecretKey)
 	userHandler := handlers.NewUserHandler(userService)
 	teamHandler := handlers.NewTeamHandler(teamService, userService)
 	sportHandler := handlers.NewSportHandler(sportService)
-	//formatHandler := handlers.NewFormatHandler(formatService)
 	tournamentHandler := handlers.NewTournamentHandler(tournamentService)
-	// participantHandler := handlers.NewParticipantHandler(participantService, tournamentService)
 	inviteHandler := handlers.NewInviteHandler(inviteService)
 
 	router := chi.NewRouter()
@@ -85,7 +91,6 @@ func main() {
 		tournamentHandler,
 		sportHandler,
 		inviteHandler,
-		// participantHandler,
 	)
 
 	server := &http.Server{

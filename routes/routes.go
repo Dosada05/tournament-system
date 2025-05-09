@@ -3,8 +3,8 @@ package api
 import (
 	"github.com/Dosada05/tournament-system/handlers"
 	"github.com/Dosada05/tournament-system/middleware"
+	"github.com/Dosada05/tournament-system/models" // Нужно для middleware.Authorize
 
-	_ "github.com/Dosada05/tournament-system/docs"
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
@@ -17,11 +17,9 @@ func SetupRoutes(
 	userHandler *handlers.UserHandler,
 	teamHandler *handlers.TeamHandler,
 	tournamentHandler *handlers.TournamentHandler,
-	// participantHandler *handlers.ParticipantHandler,
 	sportHandler *handlers.SportHandler,
 	inviteHandler *handlers.InviteHandler,
 ) {
-
 	router.Use(chiMiddleware.Logger)
 	router.Use(chiMiddleware.Recoverer)
 	router.Use(chiMiddleware.RequestID)
@@ -29,7 +27,7 @@ func SetupRoutes(
 
 	router.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
 		ExposedHeaders:   []string{"Link"},
 		AllowCredentials: true,
@@ -38,7 +36,6 @@ func SetupRoutes(
 
 	router.Get("/swagger/*", httpSwagger.WrapHandler)
 
-	// --- Публичные маршруты для аутентификации ---
 	router.Route("/users", func(r chi.Router) {
 		r.Post("/signup", authHandler.Register)
 		r.Post("/signin", authHandler.Login)
@@ -47,6 +44,7 @@ func SetupRoutes(
 		r.Group(func(authRouter chi.Router) {
 			authRouter.Use(middleware.Authenticate)
 			authRouter.Put("/{id}", userHandler.UpdateUserByID)
+			authRouter.Post("/{id}/avatar", userHandler.UploadUserLogo)
 		})
 	})
 
@@ -56,12 +54,11 @@ func SetupRoutes(
 
 		r.Group(func(authRouter chi.Router) {
 			authRouter.Use(middleware.Authenticate)
-
 			authRouter.Post("/", teamHandler.CreateTeam)
 			authRouter.Put("/{teamID}", teamHandler.UpdateTeamDetails)
 			authRouter.Delete("/{teamID}", teamHandler.DeleteTeam)
-			authRouter.Post("/{teamID}/members/{userID}", teamHandler.AddMember)
 			authRouter.Delete("/{teamID}/members/{userID}", teamHandler.RemoveMember)
+			authRouter.Post("/{teamID}/logo", teamHandler.UploadTeamLogo)
 		})
 	})
 
@@ -69,31 +66,28 @@ func SetupRoutes(
 		r.Get("/", tournamentHandler.ListHandler)
 		r.Get("/{tournamentID}", tournamentHandler.GetByIDHandler)
 
-		// Эндпоинты, требующие аутентификации
 		r.Group(func(authRouter chi.Router) {
 			authRouter.Use(middleware.Authenticate)
-
 			authRouter.Post("/", tournamentHandler.CreateHandler)
 			authRouter.Put("/{tournamentID}", tournamentHandler.UpdateDetailsHandler)
 			authRouter.Patch("/{tournamentID}/status", tournamentHandler.UpdateStatusHandler)
 			authRouter.Delete("/{tournamentID}", tournamentHandler.DeleteHandler)
+			authRouter.Post("/{tournamentID}/logo", tournamentHandler.UploadTournamentLogoHandler)
 		})
 	})
 
 	router.Route("/sports", func(r chi.Router) {
-		// Публичные
 		r.Get("/", sportHandler.GetAllSports)
 		r.Get("/{sportID}", sportHandler.GetSportByID)
 
-		// Требуют аутентификации и прав администратора
 		r.Group(func(adminRouter chi.Router) {
 			adminRouter.Use(middleware.Authenticate)
-			// Можно добавить middleware для проверки роли админа, если нужно
-			// adminRouter.Use(middleware.AuthorizeAdmin)
+			adminRouter.Use(middleware.Authorize(models.RoleAdmin))
 
 			adminRouter.Post("/", sportHandler.CreateSport)
 			adminRouter.Put("/{sportID}", sportHandler.UpdateSport)
 			adminRouter.Delete("/{sportID}", sportHandler.DeleteSport)
+			adminRouter.Post("/{sportID}/logo", sportHandler.UploadSportLogoHandler)
 		})
 	})
 
@@ -103,13 +97,9 @@ func SetupRoutes(
 	})
 
 	router.Route("/teams/{teamID}/invites", func(r chi.Router) {
-		r.Use(middleware.Authenticate) // Все эндпоинты здесь требуют аутентификации
-
-		// r.Use(middleware.AuthorizeCaptainOrAdmin)
-
+		r.Use(middleware.Authenticate)
 		r.Post("/", inviteHandler.CreateOrRenewInviteHandler)
 		r.Get("/", inviteHandler.GetTeamInviteHandler)
 		r.Delete("/", inviteHandler.RevokeInviteHandler)
 	})
-
 }

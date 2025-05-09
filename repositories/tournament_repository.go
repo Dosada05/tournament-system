@@ -36,6 +36,7 @@ type TournamentRepository interface {
 	Update(ctx context.Context, tournament *models.Tournament) error
 	UpdateStatus(ctx context.Context, id int, status models.TournamentStatus) error
 	Delete(ctx context.Context, id int) error
+	UpdateLogoKey(ctx context.Context, tournamentID int, logoKey *string) error
 }
 
 type postgresTournamentRepository struct {
@@ -50,13 +51,13 @@ func (r *postgresTournamentRepository) Create(ctx context.Context, t *models.Tou
 	query := `
 		INSERT INTO tournaments (
 			name, description, sport_id, format_id, organizer_id,
-			reg_date, start_date, end_date, location, status, max_participants
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+			reg_date, start_date, end_date, location, status, max_participants, logo_key
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		RETURNING id, created_at`
 
 	err := r.db.QueryRowContext(ctx, query,
 		t.Name, t.Description, t.SportID, t.FormatID, t.OrganizerID,
-		t.RegDate, t.StartDate, t.EndDate, t.Location, t.Status, t.MaxParticipants,
+		t.RegDate, t.StartDate, t.EndDate, t.Location, t.Status, t.MaxParticipants, t.LogoKey,
 	).Scan(&t.ID, &t.CreatedAt)
 
 	return r.handleTournamentError(err)
@@ -66,14 +67,14 @@ func (r *postgresTournamentRepository) GetByID(ctx context.Context, id int) (*mo
 	query := `
 		SELECT
 			id, name, description, sport_id, format_id, organizer_id,
-			reg_date, start_date, end_date, location, status, max_participants, created_at
+			reg_date, start_date, end_date, location, status, max_participants, created_at, logo_key
 		FROM tournaments
 		WHERE id = $1`
 
 	t := &models.Tournament{}
 	err := r.db.QueryRowContext(ctx, query, id).Scan(
 		&t.ID, &t.Name, &t.Description, &t.SportID, &t.FormatID, &t.OrganizerID,
-		&t.RegDate, &t.StartDate, &t.EndDate, &t.Location, &t.Status, &t.MaxParticipants, &t.CreatedAt,
+		&t.RegDate, &t.StartDate, &t.EndDate, &t.Location, &t.Status, &t.MaxParticipants, &t.CreatedAt, &t.LogoKey,
 	)
 
 	if err != nil {
@@ -89,7 +90,7 @@ func (r *postgresTournamentRepository) List(ctx context.Context, filter ListTour
 	query := `
 		SELECT
 			id, name, description, sport_id, format_id, organizer_id,
-			reg_date, start_date, end_date, location, status, max_participants, created_at
+			reg_date, start_date, end_date, location, status, max_participants, created_at, logo_key
 		FROM tournaments
 		WHERE 1=1`
 
@@ -141,7 +142,7 @@ func (r *postgresTournamentRepository) List(ctx context.Context, filter ListTour
 		var t models.Tournament
 		if scanErr := rows.Scan(
 			&t.ID, &t.Name, &t.Description, &t.SportID, &t.FormatID, &t.OrganizerID,
-			&t.RegDate, &t.StartDate, &t.EndDate, &t.Location, &t.Status, &t.MaxParticipants, &t.CreatedAt,
+			&t.RegDate, &t.StartDate, &t.EndDate, &t.Location, &t.Status, &t.MaxParticipants, &t.CreatedAt, &t.LogoKey,
 		); scanErr != nil {
 			return nil, scanErr
 		}
@@ -193,6 +194,15 @@ func (r *postgresTournamentRepository) UpdateStatus(ctx context.Context, id int,
 	return r.checkAffected(result)
 }
 
+func (r *postgresTournamentRepository) UpdateLogoKey(ctx context.Context, tournamentID int, logoKey *string) error {
+	query := `UPDATE tournaments SET logo_key = $1 WHERE id = $2`
+	result, err := r.db.ExecContext(ctx, query, logoKey, tournamentID)
+	if err != nil {
+		return fmt.Errorf("failed to update tournament logo key: %w", err)
+	}
+	return r.checkAffected(result)
+}
+
 func (r *postgresTournamentRepository) Delete(ctx context.Context, id int) error {
 	query := `DELETE FROM tournaments WHERE id = $1`
 	result, err := r.db.ExecContext(ctx, query, id)
@@ -209,7 +219,7 @@ func (r *postgresTournamentRepository) handleTournamentError(err error) error {
 	if pqErr, ok := err.(*pq.Error); ok {
 		switch pqErr.Code {
 		case "23505":
-			if pqErr.Constraint == "tournaments_organizer_id_name_key" {
+			if pqErr.Constraint == "tournaments_organizer_id_name_key" { // Предполагая, что такой constraint есть
 				return ErrTournamentNameConflict
 			}
 		case "23503":
@@ -221,6 +231,9 @@ func (r *postgresTournamentRepository) handleTournamentError(err error) error {
 			case "tournaments_organizer_id_fkey":
 				return ErrTournamentInvalidOrg
 			default:
+				// Если это constraint, связанный с participants или matches, то это ErrTournamentInUse
+				// Здесь сложно точно определить без знания всех constraint'ов,
+				// но для удаления это будет основной причиной FK violation.
 				return ErrTournamentInUse
 			}
 		}

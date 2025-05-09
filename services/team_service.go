@@ -4,10 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
+	"time"
 
 	"github.com/Dosada05/tournament-system/models"
 	"github.com/Dosada05/tournament-system/repositories"
+	"github.com/Dosada05/tournament-system/storage"
+)
+
+const (
+	teamLogoPrefix = "logos/teams"
 )
 
 var (
@@ -19,17 +26,15 @@ var (
 	ErrMemberAddFailed          = errors.New("failed to add member to team")
 	ErrMemberRemoveFailed       = errors.New("failed to remove member from team")
 	ErrInvalidSportID           = errors.New("invalid sport ID provided")
-	// ErrUserNotFound предполагается определенным в user_service.go или общем errors.go
-	// ErrForbiddenOperation предполагается определенным здесь или в общем errors.go
 )
 
 type TeamService interface {
 	CreateTeam(ctx context.Context, input CreateTeamInput) (*models.Team, error)
 	GetTeamByID(ctx context.Context, teamID int) (*models.Team, error)
 	UpdateTeamDetails(ctx context.Context, teamID int, input UpdateTeamInput, currentUserID int) (*models.Team, error)
-	AddMember(ctx context.Context, teamID int, userID int, currentUserID int) error
 	RemoveMember(ctx context.Context, teamID int, userIDToRemove int, currentUserID int) error
 	DeleteTeam(ctx context.Context, teamID int, currentUserID int) error
+	UploadLogo(ctx context.Context, teamID int, currentUserID int, file io.Reader, contentType string) (*models.Team, error)
 }
 
 type CreateTeamInput struct {
@@ -45,19 +50,22 @@ type UpdateTeamInput struct {
 
 type teamService struct {
 	teamRepo  repositories.TeamRepository
-	userRepo  repositories.UserRepository // Предполагается наличие метода ListByTeamID
+	userRepo  repositories.UserRepository
 	sportRepo repositories.SportRepository
+	uploader  storage.FileUploader
 }
 
 func NewTeamService(
 	teamRepo repositories.TeamRepository,
 	userRepo repositories.UserRepository,
 	sportRepo repositories.SportRepository,
+	uploader storage.FileUploader,
 ) TeamService {
 	return &teamService{
 		teamRepo:  teamRepo,
 		userRepo:  userRepo,
 		sportRepo: sportRepo,
+		uploader:  uploader,
 	}
 }
 
@@ -77,7 +85,7 @@ func (s *teamService) CreateTeam(ctx context.Context, input CreateTeamInput) (*m
 	creator, err := s.userRepo.GetByID(ctx, input.CreatorID)
 	if err != nil {
 		if errors.Is(err, repositories.ErrUserNotFound) {
-			return nil, ErrUserNotFound // Используем ошибку из user_service или общую
+			return nil, ErrUserNotFound
 		}
 		return nil, fmt.Errorf("failed to get creator user %d: %w", input.CreatorID, err)
 	}
@@ -89,7 +97,7 @@ func (s *teamService) CreateTeam(ctx context.Context, input CreateTeamInput) (*m
 	team := &models.Team{
 		Name:      name,
 		SportID:   input.SportID,
-		CaptainID: input.CreatorID, // Используем CaptainID как в репозитории
+		CaptainID: input.CreatorID,
 	}
 
 	err = s.teamRepo.Create(ctx, team)
@@ -98,22 +106,18 @@ func (s *teamService) CreateTeam(ctx context.Context, input CreateTeamInput) (*m
 		case errors.Is(err, repositories.ErrTeamNameConflict):
 			return nil, ErrTeamNameConflict
 		case errors.Is(err, repositories.ErrTeamCaptainInvalid):
-			// Эта ошибка репозитория означает, что CreatorID невалиден
 			return nil, ErrUserNotFound
 		case errors.Is(err, repositories.ErrTeamSportInvalid):
-			// Эта ошибка репозитория означает, что SportID невалиден
 			return nil, ErrInvalidSportID
 		default:
 			return nil, fmt.Errorf("%w: %w", ErrTeamCreationFailed, err)
 		}
 	}
 
-	creator.TeamID = &team.ID // team.ID присваивается после успешного Create
+	creator.TeamID = &team.ID
 	err = s.userRepo.Update(ctx, creator)
 	if err != nil {
-		// Попытка отката
-		_ = s.teamRepo.Delete(ctx, team.ID) // Игнорируем ошибку отката
-		// Возвращаем осмысленную ошибку
+		_ = s.teamRepo.Delete(ctx, team.ID)
 		return nil, fmt.Errorf("failed to assign creator %d to new team %d: %w", creator.ID, team.ID, err)
 	}
 
@@ -128,6 +132,7 @@ func (s *teamService) GetTeamByID(ctx context.Context, teamID int) (*models.Team
 		}
 		return nil, fmt.Errorf("failed to get team by id %d: %w", teamID, err)
 	}
+	s.populateTeamLogoURL(team)
 	return team, nil
 }
 
@@ -137,7 +142,6 @@ func (s *teamService) UpdateTeamDetails(ctx context.Context, teamID int, input U
 		return nil, err
 	}
 
-	// Проверка прав: только капитан может редактировать
 	if team.CaptainID != currentUserID {
 		return nil, ErrCaptainActionForbidden
 	}
@@ -154,7 +158,6 @@ func (s *teamService) UpdateTeamDetails(ctx context.Context, teamID int, input U
 		}
 	}
 	if input.SportID != nil && *input.SportID != team.SportID {
-		// Проверяем существование нового SportID
 		if _, err := s.sportRepo.GetByID(ctx, *input.SportID); err != nil {
 			if errors.Is(err, repositories.ErrSportNotFound) {
 				return nil, ErrInvalidSportID
@@ -166,7 +169,8 @@ func (s *teamService) UpdateTeamDetails(ctx context.Context, teamID int, input U
 	}
 
 	if !updated {
-		return team, nil // Нет изменений, не вызываем Update
+		s.populateTeamLogoURL(team)
+		return team, nil
 	}
 
 	err = s.teamRepo.Update(ctx, team)
@@ -175,55 +179,17 @@ func (s *teamService) UpdateTeamDetails(ctx context.Context, teamID int, input U
 		case errors.Is(err, repositories.ErrTeamNameConflict):
 			return nil, ErrTeamNameConflict
 		case errors.Is(err, repositories.ErrTeamCaptainInvalid):
-			// Ошибка FK на капитана при Update маловероятна, но обрабатываем
 			return nil, ErrUserNotFound
 		case errors.Is(err, repositories.ErrTeamSportInvalid):
-			// Ошибка FK на спорт при Update
 			return nil, ErrInvalidSportID
 		case errors.Is(err, repositories.ErrTeamNotFound):
-			// Команда была удалена между GetByID и Update
 			return nil, ErrTeamNotFound
 		default:
 			return nil, fmt.Errorf("%w: %w", ErrTeamUpdateFailed, err)
 		}
 	}
-
+	s.populateTeamLogoURL(team)
 	return team, nil
-}
-
-func (s *teamService) AddMember(ctx context.Context, teamID int, userID int, currentUserID int) error {
-	team, err := s.GetTeamByID(ctx, teamID)
-	if err != nil {
-		return err
-	}
-
-	// Проверка прав: только капитан может добавлять
-	if team.CaptainID != currentUserID {
-		return ErrCaptainActionForbidden
-	}
-
-	userToAdd, err := s.userRepo.GetByID(ctx, userID)
-	if err != nil {
-		if errors.Is(err, repositories.ErrUserNotFound) {
-			return ErrUserNotFound
-		}
-		return fmt.Errorf("failed to get user %d to add: %w", userID, err)
-	}
-
-	// Проверка: пользователь уже в команде?
-	if userToAdd.TeamID != nil {
-		// Дополнительно можно проверить: if *userToAdd.TeamID == teamID { return errors.New("user already in this team") }
-		return ErrUserAlreadyInTeam
-	}
-
-	userToAdd.TeamID = &team.ID // Присваиваем ID команды
-	err = s.userRepo.Update(ctx, userToAdd)
-	if err != nil {
-		// Обработка ошибки обновления пользователя (например, конфликт)
-		return fmt.Errorf("%w: %w", ErrMemberAddFailed, err)
-	}
-
-	return nil
 }
 
 func (s *teamService) RemoveMember(ctx context.Context, teamID int, userIDToRemove int, currentUserID int) error {
@@ -240,84 +206,163 @@ func (s *teamService) RemoveMember(ctx context.Context, teamID int, userIDToRemo
 		return fmt.Errorf("failed to get user %d to remove: %w", userIDToRemove, err)
 	}
 
-	// Проверка: пользователь состоит в *этой* команде?
 	if userToRemove.TeamID == nil || *userToRemove.TeamID != team.ID {
 		return ErrUserNotInThisTeam
 	}
 
-	// Проверка прав: действие выполняет капитан ИЛИ пользователь удаляет сам себя
 	isCaptainAction := team.CaptainID == currentUserID
 	isSelfLeave := userIDToRemove == currentUserID
 
 	if !isCaptainAction && !isSelfLeave {
-		return ErrSelfLeaveForbidden // Ни капитан, ни сам пользователь
+		return ErrSelfLeaveForbidden
 	}
 
-	// Проверка: нельзя удалить капитана
 	if userToRemove.ID == team.CaptainID {
 		return ErrCannotRemoveCaptain
 	}
 
-	userToRemove.TeamID = nil // Обнуляем TeamID
+	userToRemove.TeamID = nil
 	err = s.userRepo.Update(ctx, userToRemove)
 	if err != nil {
-		// Обработка ошибки обновления пользователя
 		return fmt.Errorf("%w: %w", ErrMemberRemoveFailed, err)
 	}
 
 	return nil
 }
 
-// DeleteTeam требует, чтобы UserRepository имел метод ListByTeamID
 func (s *teamService) DeleteTeam(ctx context.Context, teamID int, currentUserID int) error {
 	team, err := s.GetTeamByID(ctx, teamID)
 	if err != nil {
 		return err
 	}
 
-	// Проверка прав: только капитан может удалить команду
 	if team.CaptainID != currentUserID {
 		return ErrCaptainActionForbidden
 	}
 
-	// Проверка: команда должна быть пустой (кроме капитана)
-	// **ПРЕДПОЛАГАЕТСЯ НАЛИЧИЕ userRepo.ListByTeamID**
 	members, err := s.userRepo.ListByTeamID(ctx, teamID)
 	if err != nil {
-		// Обработка ошибки получения списка членов
 		return fmt.Errorf("failed to check team members for deletion: %w", err)
 	}
 
-	if len(members) > 1 { // Если в команде больше одного человека
+	if len(members) > 1 {
 		return fmt.Errorf("%w: team has %d members", ErrTeamCannotDeleteNotEmpty, len(members))
 	}
-	// Дополнительная проверка: если остался один, то это должен быть капитан
 	if len(members) == 1 && members[0].ID != team.CaptainID {
-		// Эта ситуация не должна возникать при правильной логике Add/Remove, но проверим
 		return fmt.Errorf("%w: the only remaining member is not the captain", ErrTeamCannotDeleteNotEmpty)
 	}
 
-	// Удаляем команду из репозитория
 	err = s.teamRepo.Delete(ctx, teamID)
 	if err != nil {
 		if errors.Is(err, repositories.ErrTeamNotFound) {
-			return ErrTeamNotFound // Маловероятно после GetByID
+			return ErrTeamNotFound
 		}
-		// Другие возможные ошибки удаления (например, FK, если не обработано репозиторием)
 		return fmt.Errorf("%w: %w", ErrTeamDeleteFailed, err)
 	}
 
-	// Если удаление команды прошло успешно и в команде был только капитан,
-	// обнуляем TeamID у этого капитана.
 	if len(members) == 1 && members[0].ID == team.CaptainID {
-		captain := members[0] // Получаем модель капитана из списка
+		captain := members[0]
 		captain.TeamID = nil
-		errUpdate := s.userRepo.Update(ctx, &captain) // Передаем указатель на модель
+		errUpdate := s.userRepo.Update(ctx, &captain)
 		if errUpdate != nil {
-			// Логируем ошибку, но не возвращаем ее, т.к. команда уже удалена
 			fmt.Printf("Warning: failed to remove team ID from captain %d after team %d deletion: %v\n", captain.ID, teamID, errUpdate)
 		}
 	}
+	if team.LogoKey != nil && *team.LogoKey != "" {
+		go func(keyToDelete string) {
+			deleteCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if deleteErr := s.uploader.Delete(deleteCtx, keyToDelete); deleteErr != nil {
+				fmt.Printf("Warning: Failed to delete team logo %s during team deletion: %v\n", keyToDelete, deleteErr)
+			}
+		}(*team.LogoKey)
+	}
 
 	return nil
+}
+
+func (s *teamService) UploadLogo(ctx context.Context, teamID int, currentUserID int, file io.Reader, contentType string) (*models.Team, error) {
+	team, err := s.teamRepo.GetByID(ctx, teamID)
+	if err != nil {
+		if errors.Is(err, repositories.ErrTeamNotFound) {
+			return nil, ErrTeamNotFound
+		}
+		return nil, fmt.Errorf("failed to get team %d for logo upload: %w", teamID, err)
+	}
+
+	if team.CaptainID != currentUserID {
+		return nil, ErrCaptainActionForbidden
+	}
+
+	if !strings.HasPrefix(contentType, "image/") {
+		return nil, ErrInvalidLogoFormat
+	}
+
+	oldLogoKey := team.LogoKey
+
+	ext, err := GetExtensionFromContentType(contentType)
+	if err != nil {
+		return nil, err
+	}
+
+	newKey := fmt.Sprintf("%s/%d/logo_%d%s", teamLogoPrefix, teamID, time.Now().UnixNano(), ext)
+
+	_, err = s.uploader.Upload(ctx, newKey, contentType, file)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrLogoUploadFailed, newKey, err)
+	}
+
+	err = s.teamRepo.UpdateLogoKey(ctx, teamID, &newKey)
+	if err != nil {
+		if deleteErr := s.uploader.Delete(context.Background(), newKey); deleteErr != nil {
+			fmt.Printf("CRITICAL: Failed to delete uploaded team logo %s after DB update error: %v. DB error: %v\n", newKey, deleteErr, err)
+		}
+		if errors.Is(err, repositories.ErrTeamNotFound) {
+			return nil, ErrTeamNotFound
+		}
+		return nil, fmt.Errorf("%w: %w", ErrLogoUpdateDatabaseFailed, err)
+	}
+
+	if oldLogoKey != nil && *oldLogoKey != "" && *oldLogoKey != newKey {
+		go func(keyToDelete string) {
+			deleteCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			if deleteErr := s.uploader.Delete(deleteCtx, keyToDelete); deleteErr != nil {
+				fmt.Printf("Warning: Failed to delete old team logo %s: %v\n", keyToDelete, deleteErr)
+			}
+		}(*oldLogoKey)
+	}
+
+	team.LogoKey = &newKey
+	s.populateTeamLogoURL(team)
+	return team, nil
+}
+
+func (s *teamService) populateTeamLogoURL(team *models.Team) {
+	if team != nil && team.LogoKey != nil && *team.LogoKey != "" {
+		url := s.uploader.GetPublicURL(*team.LogoKey)
+		if url != "" {
+			team.LogoURL = &url
+		}
+	}
+}
+
+func GetExtensionFromContentType(contentType string) (string, error) {
+	switch contentType {
+	case "image/jpeg":
+		return ".jpg", nil
+	case "image/png":
+		return ".png", nil
+	case "image/gif":
+		return ".gif", nil
+	case "image/webp":
+		return ".webp", nil
+	default:
+		parts := strings.Split(contentType, "/")
+		if len(parts) == 2 && strings.HasPrefix(parts[0], "image") && parts[1] != "" {
+			ext := "." + strings.Split(parts[1], "+")[0]
+			return ext, nil
+		}
+		return "", fmt.Errorf("%w: unsupported content type '%s'", ErrCouldNotDetermineFileExtension, contentType)
+	}
 }
