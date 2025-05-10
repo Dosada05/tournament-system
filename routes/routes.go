@@ -3,7 +3,7 @@ package api
 import (
 	"github.com/Dosada05/tournament-system/handlers"
 	"github.com/Dosada05/tournament-system/middleware"
-	"github.com/Dosada05/tournament-system/models" // Нужно для middleware.Authorize
+	"github.com/Dosada05/tournament-system/models"
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
@@ -19,7 +19,9 @@ func SetupRoutes(
 	tournamentHandler *handlers.TournamentHandler,
 	sportHandler *handlers.SportHandler,
 	inviteHandler *handlers.InviteHandler,
+	participantHandler *handlers.ParticipantHandler,
 ) {
+	// ... (middlewares, swagger, users, teams, sports, invites без изменений) ...
 	router.Use(chiMiddleware.Logger)
 	router.Use(chiMiddleware.Recoverer)
 	router.Use(chiMiddleware.RequestID)
@@ -62,20 +64,6 @@ func SetupRoutes(
 		})
 	})
 
-	router.Route("/tournaments", func(r chi.Router) {
-		r.Get("/", tournamentHandler.ListHandler)
-		r.Get("/{tournamentID}", tournamentHandler.GetByIDHandler)
-
-		r.Group(func(authRouter chi.Router) {
-			authRouter.Use(middleware.Authenticate)
-			authRouter.Post("/", tournamentHandler.CreateHandler)
-			authRouter.Put("/{tournamentID}", tournamentHandler.UpdateDetailsHandler)
-			authRouter.Patch("/{tournamentID}/status", tournamentHandler.UpdateStatusHandler)
-			authRouter.Delete("/{tournamentID}", tournamentHandler.DeleteHandler)
-			authRouter.Post("/{tournamentID}/logo", tournamentHandler.UploadTournamentLogoHandler)
-		})
-	})
-
 	router.Route("/sports", func(r chi.Router) {
 		r.Get("/", sportHandler.GetAllSports)
 		r.Get("/{sportID}", sportHandler.GetSportByID)
@@ -83,7 +71,6 @@ func SetupRoutes(
 		r.Group(func(adminRouter chi.Router) {
 			adminRouter.Use(middleware.Authenticate)
 			adminRouter.Use(middleware.Authorize(models.RoleAdmin))
-
 			adminRouter.Post("/", sportHandler.CreateSport)
 			adminRouter.Put("/{sportID}", sportHandler.UpdateSport)
 			adminRouter.Delete("/{sportID}", sportHandler.DeleteSport)
@@ -101,5 +88,37 @@ func SetupRoutes(
 		r.Post("/", inviteHandler.CreateOrRenewInviteHandler)
 		r.Get("/", inviteHandler.GetTeamInviteHandler)
 		r.Delete("/", inviteHandler.RevokeInviteHandler)
+	})
+
+	router.Route("/tournaments", func(r chi.Router) {
+		r.Get("/", tournamentHandler.ListHandler)
+		r.Get("/{tournamentID}", tournamentHandler.GetByIDHandler) // Публичный доступ к деталям
+
+		// Публичный доступ к матчам турнира
+		r.Get("/{tournamentID}/matches/solo", tournamentHandler.ListTournamentSoloMatchesHandler)
+		r.Get("/{tournamentID}/matches/team", tournamentHandler.ListTournamentTeamMatchesHandler)
+
+		// Публичный доступ к участникам (сервис сам решает, что показывать)
+		r.Get("/{tournamentID}/participants", participantHandler.ListApplications)
+
+		r.Group(func(authRouter chi.Router) {
+			authRouter.Use(middleware.Authenticate)
+			// Создание и управление турниром (для организаторов)
+			authRouter.Post("/", tournamentHandler.CreateHandler)
+			authRouter.Put("/{tournamentID}", tournamentHandler.UpdateDetailsHandler)
+			authRouter.Patch("/{tournamentID}/status", tournamentHandler.UpdateStatusHandler)
+			authRouter.Delete("/{tournamentID}", tournamentHandler.DeleteHandler)
+			authRouter.Post("/{tournamentID}/logo", tournamentHandler.UploadTournamentLogoHandler)
+
+			// Регистрация на турнир (для аутентифицированных пользователей)
+			authRouter.Post("/{tournamentID}/register/solo", participantHandler.RegisterSolo)
+			authRouter.Post("/{tournamentID}/register/team", participantHandler.RegisterTeam)
+		})
+	})
+
+	router.Route("/participants/{participantID}", func(r chi.Router) {
+		r.Use(middleware.Authenticate)
+		r.Delete("/cancel", participantHandler.CancelRegistration)
+		r.Patch("/status", participantHandler.UpdateApplicationStatus)
 	})
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"golang.org/x/sync/errgroup"
 	"io"
 	"strings"
 	"time"
@@ -37,7 +38,7 @@ var (
 
 type TournamentService interface {
 	CreateTournament(ctx context.Context, organizerID int, input CreateTournamentInput) (*models.Tournament, error)
-	GetTournamentByID(ctx context.Context, id int) (*models.Tournament, error)
+	GetTournamentByID(ctx context.Context, id int, currentUserID int) (*models.Tournament, error) // Добавили currentUserID
 	ListTournaments(ctx context.Context, filter ListTournamentsFilter) ([]models.Tournament, error)
 	UpdateTournamentDetails(ctx context.Context, id int, currentUserID int, input UpdateTournamentDetailsInput) (*models.Tournament, error)
 	UpdateTournamentStatus(ctx context.Context, id int, currentUserID int, status models.TournamentStatus) (*models.Tournament, error)
@@ -77,11 +78,13 @@ type ListTournamentsFilter struct {
 }
 
 type tournamentService struct {
-	tournamentRepo repositories.TournamentRepository
-	sportRepo      repositories.SportRepository
-	formatRepo     repositories.FormatRepository
-	userRepo       repositories.UserRepository
-	uploader       storage.FileUploader
+	tournamentRepo  repositories.TournamentRepository
+	sportRepo       repositories.SportRepository
+	formatRepo      repositories.FormatRepository
+	userRepo        repositories.UserRepository
+	participantRepo repositories.ParticipantRepository // Добавили
+	matchService    MatchService                       // Добавили
+	uploader        storage.FileUploader
 }
 
 func NewTournamentService(
@@ -89,14 +92,18 @@ func NewTournamentService(
 	sportRepo repositories.SportRepository,
 	formatRepo repositories.FormatRepository,
 	userRepo repositories.UserRepository,
+	participantRepo repositories.ParticipantRepository, // Добавили
+	matchService MatchService,                          // Добавили
 	uploader storage.FileUploader,
 ) TournamentService {
 	return &tournamentService{
-		tournamentRepo: tournamentRepo,
-		sportRepo:      sportRepo,
-		formatRepo:     formatRepo,
-		userRepo:       userRepo,
-		uploader:       uploader,
+		tournamentRepo:  tournamentRepo,
+		sportRepo:       sportRepo,
+		formatRepo:      formatRepo,
+		userRepo:        userRepo,
+		participantRepo: participantRepo, // Добавили
+		matchService:    matchService,    // Добавили
+		uploader:        uploader,
 	}
 }
 
@@ -112,6 +119,19 @@ func (s *tournamentService) populateTournamentLogoURL(tournament *models.Tournam
 func (s *tournamentService) populateTournamentListLogoURLs(tournaments []models.Tournament) {
 	for i := range tournaments {
 		s.populateTournamentLogoURL(&tournaments[i])
+	}
+}
+
+func (s *tournamentService) populateUserDetails(user *models.User) {
+	if user == nil {
+		return
+	}
+	user.PasswordHash = "" // Гарантированно убираем хеш
+	if user.LogoKey != nil && *user.LogoKey != "" && s.uploader != nil {
+		url := s.uploader.GetPublicURL(*user.LogoKey)
+		if url != "" {
+			user.LogoURL = &url
+		}
 	}
 }
 
@@ -184,15 +204,113 @@ func (s *tournamentService) CreateTournament(ctx context.Context, organizerID in
 	return tournament, nil
 }
 
-func (s *tournamentService) GetTournamentByID(ctx context.Context, id int) (*models.Tournament, error) {
+func (s *tournamentService) GetTournamentByID(ctx context.Context, id int, currentUserID int) (*models.Tournament, error) {
 	tournament, err := s.tournamentRepo.GetByID(ctx, id)
 	if err != nil {
-		if errors.Is(err, repositories.ErrTournamentNotFound) {
-			return nil, ErrTournamentNotFound
-		}
-		return nil, fmt.Errorf("failed to get tournament by id %d: %w", id, err)
+		return nil, handleRepositoryError(err, ErrTournamentNotFound, "failed to get tournament by id %d", id)
 	}
 	s.populateTournamentLogoURL(tournament)
+
+	g, gCtx := errgroup.WithContext(ctx)
+
+	// Загрузка спорта
+	g.Go(func() error {
+		sport, sportErr := s.sportRepo.GetByID(gCtx, tournament.SportID)
+		if sportErr != nil {
+			// Логируем ошибку, но не прерываем, если основная информация о турнире есть
+			fmt.Printf("Warning: failed to fetch sport %d for tournament %d: %v\n", tournament.SportID, id, sportErr)
+			return nil // Не возвращаем ошибку, чтобы не завалить весь запрос
+		}
+		
+		if s.uploader != nil && sport.LogoKey != nil && *sport.LogoKey != "" { // Пример заполнения для спорта
+			url := s.uploader.GetPublicURL(*sport.LogoKey)
+			if url != "" {
+				sport.LogoURL = &url
+			}
+		}
+		tournament.Sport = sport
+		return nil
+	})
+
+	// Загрузка формата
+	g.Go(func() error {
+		format, formatErr := s.formatRepo.GetByID(gCtx, tournament.FormatID)
+		if formatErr != nil {
+			fmt.Printf("Warning: failed to fetch format %d for tournament %d: %v\n", tournament.FormatID, id, formatErr)
+			return nil
+		}
+		tournament.Format = format
+		return nil
+	})
+
+	// Загрузка организатора
+	g.Go(func() error {
+		organizer, orgErr := s.userRepo.GetByID(gCtx, tournament.OrganizerID)
+		if orgErr != nil {
+			fmt.Printf("Warning: failed to fetch organizer %d for tournament %d: %v\n", tournament.OrganizerID, id, orgErr)
+			return nil
+		}
+		s.populateUserDetails(organizer) // Убираем хеш пароля и добавляем URL лого
+		tournament.Organizer = organizer
+		return nil
+	})
+
+	// Загрузка подтвержденных участников
+	// Для всех пользователей показываем только подтвержденных участников
+	confirmedStatus := models.StatusParticipant
+	participants, participantsErr := s.participantRepo.ListByTournament(gCtx, id, &confirmedStatus, true) // true - для загрузки User/Team
+	if participantsErr != nil {
+		fmt.Printf("Warning: failed to fetch participants for tournament %d: %v\n", id, participantsErr)
+		// Не прерываем, если остальные данные важны
+	} else {
+		// Заполняем LogoURL для User/Team в участниках
+		if s.uploader != nil { // Проверка, что uploader есть
+			for _, p := range participants {
+				if p.User != nil {
+					s.populateUserDetails(p.User)
+				}
+				if p.Team != nil && p.Team.LogoKey != nil && *p.Team.LogoKey != "" {
+					url := s.uploader.GetPublicURL(*p.Team.LogoKey)
+					if url != "" {
+						p.Team.LogoURL = &url
+					}
+				}
+			}
+		}
+		tournament.Participants = ParticipantsToInterface(participants) // Преобразование []*models.Participant в []models.Participant
+	}
+
+	// Загрузка соло матчей
+	g.Go(func() error {
+		soloMatches, soloMatchesErr := s.matchService.ListSoloMatchesByTournament(gCtx, id)
+		if soloMatchesErr != nil {
+			fmt.Printf("Warning: failed to fetch solo matches for tournament %d: %v\n", id, soloMatchesErr)
+			return nil
+		}
+		tournament.SoloMatches = SoloMatchesToInterface(soloMatches)
+		return nil
+	})
+
+	// Загрузка командных матчей
+	g.Go(func() error {
+		teamMatches, teamMatchesErr := s.matchService.ListTeamMatchesByTournament(gCtx, id)
+		if teamMatchesErr != nil {
+			fmt.Printf("Warning: failed to fetch team matches for tournament %d: %v\n", id, teamMatchesErr)
+			return nil
+		}
+		tournament.TeamMatches = TeamMatchesToInterface(teamMatches)
+		return nil
+	})
+
+	if err := g.Wait(); err != nil {
+		// Эта ошибка будет от errgroup, если какая-то из горутин вернула ошибку (кроме nil)
+		// Но мы возвращаем nil из горутин в случае ошибок загрузки доп. данных, чтобы не ломать основной ответ
+		// Если критично, чтобы все данные были, нужно менять логику возврата ошибок в горутинах
+		fmt.Printf("Error during parallel fetching of tournament details for tournament %d: %v\n", id, err)
+		// Можно вернуть специальную ошибку, если какие-то детали не загрузились
+		// return tournament, ErrTournamentDetailsFetchFailed
+	}
+
 	return tournament, nil
 }
 
@@ -219,10 +337,7 @@ func (s *tournamentService) ListTournaments(ctx context.Context, filter ListTour
 func (s *tournamentService) UpdateTournamentDetails(ctx context.Context, id int, currentUserID int, input UpdateTournamentDetailsInput) (*models.Tournament, error) {
 	tournament, err := s.tournamentRepo.GetByID(ctx, id)
 	if err != nil {
-		if errors.Is(err, repositories.ErrTournamentNotFound) {
-			return nil, ErrTournamentNotFound
-		}
-		return nil, fmt.Errorf("failed to get tournament %d for update: %w", id, err)
+		return nil, handleRepositoryError(err, ErrTournamentNotFound, "failed to get tournament %d for update", id)
 	}
 
 	if tournament.OrganizerID != currentUserID {
@@ -485,4 +600,43 @@ func derefString(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+func ParticipantsToInterface(slice []*models.Participant) []models.Participant {
+	if slice == nil {
+		return nil
+	}
+	result := make([]models.Participant, len(slice))
+	for i, ptr := range slice {
+		if ptr != nil {
+			result[i] = *ptr
+		}
+	}
+	return result
+}
+
+func SoloMatchesToInterface(slice []*models.SoloMatch) []models.SoloMatch {
+	if slice == nil {
+		return nil
+	}
+	result := make([]models.SoloMatch, len(slice))
+	for i, ptr := range slice {
+		if ptr != nil {
+			result[i] = *ptr
+		}
+	}
+	return result
+}
+
+func TeamMatchesToInterface(slice []*models.TeamMatch) []models.TeamMatch {
+	if slice == nil {
+		return nil
+	}
+	result := make([]models.TeamMatch, len(slice))
+	for i, ptr := range slice {
+		if ptr != nil {
+			result[i] = *ptr
+		}
+	}
+	return result
 }

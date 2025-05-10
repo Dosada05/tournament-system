@@ -165,7 +165,7 @@ CREATE INDEX idx_invites_team_id ON invites (team_id);
 
 -- Добавляем поле для ключа логотипа в таблицу users
 ALTER TABLE users
-    ADD COLUMN logo_key VARCHAR(255); -- Длина 255 должна быть достаточной для ключа/пути
+    ADD COLUMN logo_key VARCHAR(255);
 
 -- Добавляем поле для ключа логотипа в таблицу teams
 ALTER TABLE teams
