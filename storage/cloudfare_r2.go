@@ -6,10 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/url"
-	"strings" // Добавлен для очистки ETag
+	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/aws/aws-sdk-go-v2/config" // Используем этот импорт для config
+	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
@@ -36,15 +36,15 @@ func NewCloudflareR2Uploader(cfg CloudflareR2UploaderConfig) (FileUploader, erro
 	r2Resolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
 		r2Endpoint := fmt.Sprintf("https://%s.r2.cloudflarestorage.com", cfg.AccountID)
 		return aws.Endpoint{
-			URL:           r2Endpoint, // URL твоего R2 эндпоинта
-			SigningRegion: "auto",     // Говорит SDK использовать специальную логику подписи для R2
+			URL:           r2Endpoint,
+			SigningRegion: "auto",
 		}, nil
 	})
 
 	sdkCfg, err := config.LoadDefaultConfig(context.TODO(),
-		config.WithEndpointResolverWithOptions(r2Resolver), // Наш кастомный резолвер для R2
+		config.WithEndpointResolverWithOptions(r2Resolver),
 		config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(cfg.AccessKeyID, cfg.SecretAccessKey, "")),
-		config.WithRegion("auto"), // <--- ИСПРАВЛЕНИЕ: Явно указываем "auto" как регион
+		config.WithRegion("auto"),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load AWS SDK config for R2: %w", err)
@@ -75,7 +75,6 @@ func (u *cloudflareR2Uploader) Upload(ctx context.Context, key string, contentTy
 	location := u.GetPublicURL(key)
 	etag := ""
 	if result.ETag != nil {
-		// ETag от S3-совместимых API часто приходит в двойных кавычках, их нужно убрать.
 		etag = strings.Trim(*result.ETag, "\"")
 	}
 
@@ -102,29 +101,19 @@ func (u *cloudflareR2Uploader) Delete(ctx context.Context, key string) error {
 
 func (u *cloudflareR2Uploader) GetPublicURL(key string) string {
 	if u.publicBaseURL == "" || key == "" {
-		return "" // Не можем сформировать URL без этих данных
+		return ""
 	}
 
 	baseURL, err := url.Parse(u.publicBaseURL)
 	if err != nil {
-		// Логирование ошибки парсинга базового URL может быть полезно
+		// В реальном приложении здесь лучше использовать логгер вместо fmt.Printf
 		fmt.Printf("Error parsing publicBaseURL '%s': %v\n", u.publicBaseURL, err)
 		return ""
 	}
 
-	finalPath := key
-	if strings.HasSuffix(baseURL.Path, "/") && strings.HasPrefix(key, "/") {
-		finalPath = strings.TrimPrefix(key, "/")
-	} else if !strings.HasSuffix(baseURL.Path, "/") && !strings.HasPrefix(key, "/") && baseURL.Path != "" {
-		// Если baseURL.Path не пустой и не заканчивается на /, а key не начинается на /
-		// то нужно добавить / между ними, если только baseURL.Path это не просто хост.
-		// Однако, обычно publicBaseURL уже содержит нужный слеш или не содержит путь вовсе.
-		// ResolveReference должен справиться.
-	}
-
-	pathURL, err := url.Parse(finalPath)
+	pathURL, err := url.Parse(key) // Ключ может быть просто путем, url.Parse справится
 	if err != nil {
-		fmt.Printf("Error parsing key '%s' as URL path: %v\n", finalPath, err)
+		fmt.Printf("Error parsing key '%s' as URL path: %v\n", key, err)
 		return ""
 	}
 
