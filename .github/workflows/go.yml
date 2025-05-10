@@ -1,11 +1,11 @@
-name: Build and Push Docker Image
+name: Build and Push Docker Image CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main ] # Запуск при пуше в main
     tags:
-      - 'v*.*.*'
-  workflow_dispatch:
+      - 'v*.*.*'      # Запуск при создании тегов вида v1.0.0
+  workflow_dispatch:    # Разрешает ручной запуск
 
 jobs:
   test:
@@ -20,7 +20,7 @@ jobs:
           POSTGRES_PASSWORD: ${{ secrets.TEST_DB_PASSWORD }}
           POSTGRES_DB: ${{ secrets.TEST_DB_NAME }}
         ports:
-          - "5432:5432"
+          - "5432:5432" # Пробрасываем порт 5432 контейнера на 5432 хоста
 
     steps:
       - name: Checkout code
@@ -29,59 +29,58 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23.1' # Убедись, что версия Go актуальна и совпадает с Dockerfile
+          go-version: '1.22.3' # ЗАМЕНИ НА СВОЮ АКТУАЛЬНУЮ ВЕРСИЮ GO (должна совпадать с Dockerfile)
           cache: true
 
       - name: Install dependencies
-        run: go mod download
+        run: go mod download && go mod verify
 
       - name: Install PostgreSQL client
         run: sudo apt-get update && sudo apt-get install -qq -y postgresql-client
 
-      - name: Wait for PostgreSQL service to be ready
+      - name: Wait for PostgreSQL service
         run: |
-          echo "Waiting for PostgreSQL to start (port 5432 to be open and DB to respond)..."
-          # Сначала дождемся, пока GitHub Actions сделает порт доступным (это происходит до шагов)
-          # Затем наш цикл проверит логическую готовность БД
-          for i in {1..30}; do # Попытки в течение 60 секунд
-            if PGPASSWORD=${{ secrets.TEST_DB_PASSWORD }} psql -h ${{ secrets.TEST_DB_HOST }} -U ${{ secrets.TEST_DB_USER }} -d ${{ secrets.TEST_DB_NAME }} -p ${{ secrets.TEST_DB_PORT }} -c '\q'; then
-              echo "PostgreSQL is ready."
+          echo "Waiting for PostgreSQL (host='${{ secrets.TEST_DB_HOST }}', port='${{ secrets.TEST_DB_PORT }}')..."
+          for i in {1..30}; do
+            if PGPASSWORD=${{ secrets.TEST_DB_PASSWORD }} psql -h ${{ secrets.TEST_DB_HOST }} -U ${{ secrets.TEST_DB_USER }} -d ${{ secrets.TEST_DB_NAME }} -p ${{ secrets.TEST_DB_PORT }} -c '\q' &>/dev/null; then
+              echo "PostgreSQL is ready!"
               exit 0
             fi
-            if [ $i -eq 1 ]; then
-              echo "Initial connection attempt failed. Service port might still be initializing."
-              echo "PostgreSQL connection details: host='${{ secrets.TEST_DB_HOST }}', port='${{ secrets.TEST_DB_PORT }}', user='${{ secrets.TEST_DB_USER }}', db='${{ secrets.TEST_DB_NAME }}'"
-            fi
-            echo "Attempt $i: PostgreSQL not yet available. Sleeping for 2 seconds..."
+            echo "Attempt $i: PostgreSQL not ready. Sleeping 2s..."
             sleep 2
           done
-          echo "PostgreSQL did not become ready in time."
+          echo "PostgreSQL timed out."
           exit 1
         env:
-          DB_HOST: ${{ secrets.TEST_DB_HOST }} # Должен быть localhost или 127.0.0.1
-          DB_PORT: ${{ secrets.TEST_DB_PORT }} # Должен быть 5432
-          DB_USER: ${{ secrets.TEST_DB_USER }}
-          DB_NAME: ${{ secrets.TEST_DB_NAME }}
+          TEST_DB_HOST: localhost # Сервис postgres доступен по localhost для других шагов
+          TEST_DB_PORT: 5432    # Порт, который мы пробросили из сервиса
+          # TEST_DB_USER, TEST_DB_PASSWORD, TEST_DB_NAME используются напрямую из секретов в команде
 
-      - name: Apply DB Schema using psql
-        run: PGPASSWORD=${{ secrets.TEST_DB_PASSWORD }} psql -h ${{ secrets.TEST_DB_HOST }} -U ${{ secrets.TEST_DB_USER }} -d ${{ secrets.TEST_DB_NAME }} -p ${{ secrets.TEST_DB_PORT }} -a -f $SCHEMA_FILE
-        env:
-          DB_HOST: ${{ secrets.TEST_DB_HOST }}
-          DB_PORT: ${{ secrets.TEST_DB_PORT }}
-          DB_USER: ${{ secrets.TEST_DB_USER }}
-          DB_NAME: ${{ secrets.TEST_DB_NAME }}
-          SCHEMA_FILE: ./db/migrations/000001_init_schema.up.sql
+      - name: Apply DB Schema
+        run: PGPASSWORD=${{ secrets.TEST_DB_PASSWORD }} psql -h localhost -U ${{ secrets.TEST_DB_USER }} -d ${{ secrets.TEST_DB_NAME }} -p 5432 -a -f ./db/migrations/000001_init_schema.up.sql
+        # Используем localhost и порт 5432, так как они определены в services и ports
+        # Убедись, что путь ./db/migrations/000001_init_schema.up.sql корректен относительно корня репозитория
 
       - name: Run Go tests
         run: go test -v ./...
         env:
-          TEST_DATABASE_URL: "postgres://${{ secrets.TEST_DB_USER }}:${{ secrets.TEST_DB_PASSWORD }}@${{ secrets.TEST_DB_HOST }}:${{ secrets.TEST_DB_PORT }}/${{ secrets.TEST_DB_NAME }}?sslmode=disable"
+          # Эти переменные ожидает твой config.Load()
+          DATABASE_URL: "postgres://${{ secrets.TEST_DB_USER }}:${{ secrets.TEST_DB_PASSWORD }}@localhost:5432/${{ secrets.TEST_DB_NAME }}?sslmode=disable"
+          JWT_SECRET_KEY: ${{ secrets.TEST_JWT_SECRET_KEY }} # Важно для тестов, если они используют JWT
+          SERVER_PORT: "8081" # Можно использовать другой порт для тестов, если нужно
 
-  # ... (остальная часть build-and-push) ...
+          # Переменные для Cloudflare R2 (используй мок-значения или реальные тестовые, если тесты их требуют)
+          R2_ACCOUNT_ID: ${{ secrets.TEST_R2_ACCOUNT_ID }}
+          R2_ACCESS_KEY_ID: ${{ secrets.TEST_R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.TEST_R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET_NAME: ${{ secrets.TEST_R2_BUCKET_NAME }}
+          R2_PUBLIC_BASE_URL: ${{ secrets.TEST_R2_PUBLIC_BASE_URL }}
+
   build-and-push:
-    name: Build and Push to Docker Hub
+    name: Build and Push Docker Image
     runs-on: ubuntu-latest
-    needs: test
+    needs: test # Запускается только после успешного завершения тестов
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -99,17 +98,24 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: yernursarzh/tournament-system # Замени на свой Docker Hub username/image name
+          images: yernursarzh/tournament-system # ЗАМЕНИ yernursarzh на свой Docker Hub username
           tags: |
+            # Тег для не-main веток (например, branch-feature-xyz)
+            type=ref,event=branch,prefix=branch-,enable=${{ github.ref_name != 'main' && github.ref_type == 'branch' }}
+            # Теги для релизов (например, v1.0.0, v1.0.1)
             type=ref,event=tag
+            # Короткий хеш коммита (например, abc1234)
             type=sha,format=short
-            type=raw,value=latest,enable=${{ github.ref_type == 'tag' }}
+            # Тег 'latest' для main ветки и для релизных тегов
+            type=raw,value=latest,enable=${{ github.ref_name == 'main' || github.ref_type == 'tag' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile
+          file: ./Dockerfile # Указываем путь к твоему Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha # Используем кэш GitHub Actions для Docker слоев
+          cache-to: type=gha,mode=max
