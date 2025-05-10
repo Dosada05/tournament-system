@@ -16,13 +16,13 @@ jobs:
       postgres:
         image: postgres:16-alpine
         env:
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: 123123
-          POSTGRES_DB: tsdb
+          POSTGRES_USER: ${{ secrets.TEST_DB_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.TEST_DB_PASSWORD }}
+          POSTGRES_DB: ${{ secrets.TEST_DB_NAME }}
         ports:
-          - 5432:5432
+          - ${{ secrets.TEST_DB_PORT }}:${{ secrets.TEST_DB_PORT }}
         options: >-
-          --health-cmd pg_isready
+          --health-cmd pg_isready -U ${{ secrets.TEST_DB_USER }} -d ${{ secrets.TEST_DB_NAME }}
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
@@ -40,33 +40,43 @@ jobs:
       - name: Install dependencies
         run: go mod download
 
-      - name: Wait for PostgreSQL service
-        run: sleep 15
-
       - name: Install PostgreSQL client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+        run: sudo apt-get update && sudo apt-get install -qq -y postgresql-client
+
+      - name: Wait for PostgreSQL service to be ready
+        run: |
+          echo "Waiting for PostgreSQL to start..."
+          for i in {1..15}; do # Увеличил количество попыток до 15 (30 секунд)
+            PGPASSWORD=${{ secrets.TEST_DB_PASSWORD }} psql -h ${{ secrets.TEST_DB_HOST }} -U ${{ secrets.TEST_DB_USER }} -d ${{ secrets.TEST_DB_NAME }} -p ${{ secrets.TEST_DB_PORT }} -c '\q' && echo "PostgreSQL is ready." && exit 0
+            echo "Attempt $i: PostgreSQL not yet available, sleeping for 2 seconds..."
+            sleep 2
+          done
+          echo "PostgreSQL did not become ready in time." && exit 1
+        env:
+          DB_HOST: ${{ secrets.TEST_DB_HOST }}
+          DB_PORT: ${{ secrets.TEST_DB_PORT }}
+          DB_USER: ${{ secrets.TEST_DB_USER }}
+          DB_PASSWORD: ${{ secrets.TEST_DB_PASSWORD }}
+          DB_NAME: ${{ secrets.TEST_DB_NAME }}
 
       - name: Apply DB Schema using psql
-        run: PGPASSWORD=$DB_PASSWORD psql -h $DB_HOST -U $DB_USER -d $DB_NAME -p $DB_PORT -a -f $SCHEMA_FILE
+        run: PGPASSWORD=${{ secrets.TEST_DB_PASSWORD }} psql -h ${{ secrets.TEST_DB_HOST }} -U ${{ secrets.TEST_DB_USER }} -d ${{ secrets.TEST_DB_NAME }} -p ${{ secrets.TEST_DB_PORT }} -a -f $SCHEMA_FILE
         env:
-          DB_HOST: localhost
-          DB_PORT: 5432
-          DB_USER: postgres
-          DB_PASSWORD: 123123
-          DB_NAME: tsdb
+          DB_HOST: ${{ secrets.TEST_DB_HOST }}
+          DB_PORT: ${{ secrets.TEST_DB_PORT }}
+          DB_USER: ${{ secrets.TEST_DB_USER }}
+          DB_NAME: ${{ secrets.TEST_DB_NAME }}
           SCHEMA_FILE: ./db/migrations/000001_init_schema.up.sql
 
       - name: Run Go tests
         run: go test -v ./...
         env:
-          TEST_DATABASE_URL: "postgres://postgres:123123@localhost:5432/tsdb?sslmode=disable"
+          TEST_DATABASE_URL: "postgres://${{ secrets.TEST_DB_USER }}:${{ secrets.TEST_DB_PASSWORD }}@${{ secrets.TEST_DB_HOST }}:${{ secrets.TEST_DB_PORT }}/${{ secrets.TEST_DB_NAME }}?sslmode=disable"
 
   build-and-push:
     name: Build and Push to Docker Hub
     runs-on: ubuntu-latest
-
     needs: test
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
