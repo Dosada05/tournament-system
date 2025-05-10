@@ -15,16 +15,12 @@ jobs:
     services:
       postgres:
         image: postgres:16-alpine
-        env: # Секреты здесь должны работать
+        env:
           POSTGRES_USER: ${{ secrets.TEST_DB_USER }}
           POSTGRES_PASSWORD: ${{ secrets.TEST_DB_PASSWORD }}
           POSTGRES_DB: ${{ secrets.TEST_DB_NAME }}
         ports:
           - "5432:5432"
-        options: >- # Опции для Docker сервиса.
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
 
     steps:
       - name: Checkout code
@@ -33,7 +29,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22.3' # Убедись, что версия Go актуальна и совпадает с Dockerfile
+          go-version: '1.23.1' # Убедись, что версия Go актуальна и совпадает с Dockerfile
           cache: true
 
       - name: Install dependencies
@@ -44,21 +40,26 @@ jobs:
 
       - name: Wait for PostgreSQL service to be ready
         run: |
-          echo "Waiting for PostgreSQL to start..."
-          # Используем секреты для подключения в psql
-          for i in {1..30}; do # Увеличено количество попыток (до 60 секунд)
+          echo "Waiting for PostgreSQL to start (port 5432 to be open and DB to respond)..."
+          # Сначала дождемся, пока GitHub Actions сделает порт доступным (это происходит до шагов)
+          # Затем наш цикл проверит логическую готовность БД
+          for i in {1..30}; do # Попытки в течение 60 секунд
             if PGPASSWORD=${{ secrets.TEST_DB_PASSWORD }} psql -h ${{ secrets.TEST_DB_HOST }} -U ${{ secrets.TEST_DB_USER }} -d ${{ secrets.TEST_DB_NAME }} -p ${{ secrets.TEST_DB_PORT }} -c '\q'; then
               echo "PostgreSQL is ready."
               exit 0
             fi
-            echo "Attempt $i: PostgreSQL not yet available (host='${{ secrets.TEST_DB_HOST }}', port='${{ secrets.TEST_DB_PORT }}', user='${{ secrets.TEST_DB_USER }}', db='${{ secrets.TEST_DB_NAME }}'). Sleeping for 2 seconds..."
+            if [ $i -eq 1 ]; then
+              echo "Initial connection attempt failed. Service port might still be initializing."
+              echo "PostgreSQL connection details: host='${{ secrets.TEST_DB_HOST }}', port='${{ secrets.TEST_DB_PORT }}', user='${{ secrets.TEST_DB_USER }}', db='${{ secrets.TEST_DB_NAME }}'"
+            fi
+            echo "Attempt $i: PostgreSQL not yet available. Sleeping for 2 seconds..."
             sleep 2
           done
           echo "PostgreSQL did not become ready in time."
           exit 1
         env:
-          DB_HOST: ${{ secrets.TEST_DB_HOST }}
-          DB_PORT: ${{ secrets.TEST_DB_PORT }}
+          DB_HOST: ${{ secrets.TEST_DB_HOST }} # Должен быть localhost или 127.0.0.1
+          DB_PORT: ${{ secrets.TEST_DB_PORT }} # Должен быть 5432
           DB_USER: ${{ secrets.TEST_DB_USER }}
           DB_NAME: ${{ secrets.TEST_DB_NAME }}
 
@@ -76,6 +77,7 @@ jobs:
         env:
           TEST_DATABASE_URL: "postgres://${{ secrets.TEST_DB_USER }}:${{ secrets.TEST_DB_PASSWORD }}@${{ secrets.TEST_DB_HOST }}:${{ secrets.TEST_DB_PORT }}/${{ secrets.TEST_DB_NAME }}?sslmode=disable"
 
+  # ... (остальная часть build-and-push) ...
   build-and-push:
     name: Build and Push to Docker Hub
     runs-on: ubuntu-latest
@@ -97,7 +99,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: yernursarzh/tournament-system
+          images: yernursarzh/tournament-system # Замени на свой Docker Hub username/image name
           tags: |
             type=ref,event=tag
             type=sha,format=short
