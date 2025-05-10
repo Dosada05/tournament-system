@@ -13,11 +13,14 @@ import (
 
 type TournamentHandler struct {
 	tournamentService services.TournamentService
+	matchService      services.MatchService // Добавляем зависимость
 }
 
-func NewTournamentHandler(ts services.TournamentService) *TournamentHandler {
+// Обновляем конструктор
+func NewTournamentHandler(ts services.TournamentService, ms services.MatchService) *TournamentHandler {
 	return &TournamentHandler{
 		tournamentService: ts,
+		matchService:      ms,
 	}
 }
 
@@ -52,7 +55,9 @@ func (h *TournamentHandler) GetByIDHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	tournament, err := h.tournamentService.GetTournamentByID(r.Context(), id)
+	currentUserID, _ := middleware.GetUserIDFromContext(r.Context())
+
+	tournament, err := h.tournamentService.GetTournamentByID(r.Context(), id, currentUserID)
 	if err != nil {
 		mapServiceErrorToHTTP(w, r, err)
 		return
