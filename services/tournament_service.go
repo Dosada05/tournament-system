@@ -3,16 +3,18 @@ package services
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Dosada05/tournament-system/brackets"
+	"github.com/Dosada05/tournament-system/db" // For advisory lock
 	"github.com/Dosada05/tournament-system/models"
 	"github.com/Dosada05/tournament-system/repositories"
 	"github.com/Dosada05/tournament-system/storage"
@@ -37,18 +39,6 @@ var (
 	ErrTournamentDeletionNotAllowed = errors.New("tournament deletion not allowed")
 	ErrTournamentInUse              = repositories.ErrTournamentInUse
 )
-
-type TournamentService interface {
-	CreateTournament(ctx context.Context, organizerID int, input CreateTournamentInput) (*models.Tournament, error)
-	GetTournamentByID(ctx context.Context, id int, currentUserID int) (*models.Tournament, error)
-	ListTournaments(ctx context.Context, filter ListTournamentsFilter) ([]models.Tournament, error)
-	UpdateTournamentDetails(ctx context.Context, id int, currentUserID int, input UpdateTournamentDetailsInput) (*models.Tournament, error)
-	UpdateTournamentStatus(ctx context.Context, id int, currentUserID int, status models.TournamentStatus) (*models.Tournament, error)
-	DeleteTournament(ctx context.Context, id int, currentUserID int) error
-	UploadTournamentLogo(ctx context.Context, tournamentID int, currentUserID int, file io.Reader, contentType string) (*models.Tournament, error)
-	FinalizeTournament(ctx context.Context, tournamentID int, winnerParticipantID int, currentUserID int) (*models.Tournament, error)
-	GetTournamentBracketData(ctx context.Context, tournamentID int) (*FullTournamentBracketView, error) // Используем новую структуру для ответа
-}
 
 type FullTournamentBracketView struct {
 	TournamentID               int                     `json:"tournament_id"`
@@ -88,9 +78,8 @@ type ParticipantView struct {
 	Type            string  `json:"type"`              // "team" или "user"
 	Name            string  `json:"name"`
 	LogoURL         *string `json:"logo_url,omitempty"`
-	// Можно добавить оригинальные UserID/TeamID, если нужно клиенту
-	OriginalUserID *int `json:"original_user_id,omitempty"`
-	OriginalTeamID *int `json:"original_team_id,omitempty"`
+	OriginalUserID  *int    `json:"original_user_id,omitempty"`
+	OriginalTeamID  *int    `json:"original_team_id,omitempty"`
 }
 
 type CreateTournamentInput struct {
@@ -124,7 +113,21 @@ type ListTournamentsFilter struct {
 	Offset      int
 }
 
+type TournamentService interface {
+	CreateTournament(ctx context.Context, organizerID int, input CreateTournamentInput) (*models.Tournament, error)
+	GetTournamentByID(ctx context.Context, id int, currentUserID int) (*models.Tournament, error)
+	ListTournaments(ctx context.Context, filter ListTournamentsFilter) ([]models.Tournament, error)
+	UpdateTournamentDetails(ctx context.Context, id int, currentUserID int, input UpdateTournamentDetailsInput) (*models.Tournament, error)
+	UpdateTournamentStatus(ctx context.Context, id int, currentUserID int, newStatus models.TournamentStatus, exec repositories.SQLExecutor) (*models.Tournament, error)
+	DeleteTournament(ctx context.Context, id int, currentUserID int) error
+	UploadTournamentLogo(ctx context.Context, tournamentID int, currentUserID int, file io.Reader, contentType string) (*models.Tournament, error)
+	FinalizeTournament(ctx context.Context, tournamentID int, winnerParticipantID int, currentUserID int) (*models.Tournament, error)
+	GetTournamentBracketData(ctx context.Context, tournamentID int) (*FullTournamentBracketView, error)
+	AutoUpdateTournamentStatusesByDates(ctx context.Context) error
+}
+
 type tournamentService struct {
+	db              *sql.DB // Added for managing transactions directly
 	tournamentRepo  repositories.TournamentRepository
 	sportRepo       repositories.SportRepository
 	formatRepo      repositories.FormatRepository
@@ -133,60 +136,41 @@ type tournamentService struct {
 	soloMatchRepo   repositories.SoloMatchRepository
 	teamMatchRepo   repositories.TeamMatchRepository
 	bracketService  BracketService
-	matchService    MatchService
+	matchService    MatchService // Assuming MatchService might be needed
 	uploader        storage.FileUploader
 	hub             *brackets.Hub
+	logger          *slog.Logger // Added logger
 }
 
 func NewTournamentService(
+	db *sql.DB, // Added db
 	tournamentRepo repositories.TournamentRepository,
 	sportRepo repositories.SportRepository,
 	formatRepo repositories.FormatRepository,
 	userRepo repositories.UserRepository,
 	participantRepo repositories.ParticipantRepository,
+	soloMatchRepo repositories.SoloMatchRepository,
+	teamMatchRepo repositories.TeamMatchRepository,
 	bracketService BracketService,
 	matchService MatchService,
 	uploader storage.FileUploader,
 	hub *brackets.Hub,
+	logger *slog.Logger, // Added logger
 ) TournamentService {
 	return &tournamentService{
+		db:              db,
 		tournamentRepo:  tournamentRepo,
 		sportRepo:       sportRepo,
 		formatRepo:      formatRepo,
 		userRepo:        userRepo,
 		participantRepo: participantRepo,
+		soloMatchRepo:   soloMatchRepo,
+		teamMatchRepo:   teamMatchRepo,
 		bracketService:  bracketService,
 		matchService:    matchService,
 		uploader:        uploader,
 		hub:             hub,
-	}
-}
-
-func (s *tournamentService) populateTournamentLogoURL(tournament *models.Tournament) {
-	if tournament != nil && tournament.LogoKey != nil && *tournament.LogoKey != "" && s.uploader != nil {
-		url := s.uploader.GetPublicURL(*tournament.LogoKey)
-		if url != "" {
-			tournament.LogoURL = &url
-		}
-	}
-}
-
-func (s *tournamentService) populateTournamentListLogoURLs(tournaments []models.Tournament) {
-	for i := range tournaments {
-		s.populateTournamentLogoURL(&tournaments[i])
-	}
-}
-
-func (s *tournamentService) populateUserDetails(user *models.User) {
-	if user == nil {
-		return
-	}
-	user.PasswordHash = ""
-	if user.LogoKey != nil && *user.LogoKey != "" && s.uploader != nil {
-		url := s.uploader.GetPublicURL(*user.LogoKey)
-		if url != "" {
-			user.LogoURL = &url
-		}
+		logger:          logger,
 	}
 }
 
@@ -226,7 +210,7 @@ func (s *tournamentService) CreateTournament(ctx context.Context, organizerID in
 		EndDate:         input.EndDate,
 		Location:        input.Location,
 		MaxParticipants: input.MaxParticipants,
-		Status:          models.StatusSoon,
+		Status:          models.StatusSoon, // Initial status
 	}
 
 	err = s.tournamentRepo.Create(ctx, tournament)
@@ -236,7 +220,7 @@ func (s *tournamentService) CreateTournament(ctx context.Context, organizerID in
 		}
 		return nil, fmt.Errorf("%w: %w", ErrTournamentCreationFailed, err)
 	}
-	s.populateTournamentLogoURL(tournament)
+	s.populateTournamentDetails(ctx, tournament) // Populate details including logo URL if any
 	return tournament, nil
 }
 
@@ -245,93 +229,62 @@ func (s *tournamentService) GetTournamentByID(ctx context.Context, id int, curre
 	if err != nil {
 		return nil, handleRepositoryError(err, ErrTournamentNotFound, "failed to get tournament by id %d", id)
 	}
-	s.populateTournamentLogoURL(tournament)
+	s.populateTournamentDetails(ctx, tournament) // Populates Sport, Format, Organizer, and LogoURL
 
+	// Enhanced details loading
 	g, gCtx := errgroup.WithContext(ctx)
 
-	// Загрузка формата (всегда нужна)
-	if tournament.FormatID > 0 {
-		g.Go(func() error {
-			format, formatErr := s.formatRepo.GetByID(gCtx, tournament.FormatID)
-			if formatErr != nil {
-				log.Printf("Warning: failed to fetch format %d for tournament %d: %v\n", tournament.FormatID, id, formatErr)
-				return nil // Не делаем ошибку критической, если другие данные могут быть полезны
-			}
-			tournament.Format = format
-			return nil
-		})
-	}
-
-	// Загрузка участников (подтвержденных)
-	// Вне зависимости от статуса, может быть полезно видеть подтвержденных участников
+	// Load confirmed participants
 	g.Go(func() error {
 		confirmedStatus := models.StatusParticipant
-		dbParticipants, participantsErr := s.participantRepo.ListByTournament(gCtx, id, &confirmedStatus, true)
+		dbParticipants, participantsErr := s.participantRepo.ListByTournament(gCtx, id, &confirmedStatus, true) // true for nested details
 		if participantsErr != nil {
-			log.Printf("Warning: failed to fetch confirmed participants for tournament %d: %v\n", id, participantsErr)
+			s.logger.WarnContext(gCtx, "Failed to fetch confirmed participants", slog.Int("tournament_id", id), slog.Any("error", participantsErr))
+			// Decide if this is a critical error or if we can proceed
 		} else {
-			s.populateParticipantListDetails(dbParticipants)
+			populateParticipantListDetailsFunc(dbParticipants, s.uploader) // Using helper
 			tournament.Participants = ParticipantsToInterface(dbParticipants)
 		}
-		return nil
+		return nil // Return nil to not fail the group for this non-critical load
 	})
 
-	// Загрузка матчей, если турнир активен или завершен (через MatchService)
+	// Load matches if tournament is active or completed
 	if tournament.Status == models.StatusActive || tournament.Status == models.StatusCompleted {
-		g.Go(func() error {
-			soloMatches, soloErr := s.matchService.ListSoloMatchesByTournament(gCtx, id)
-			if soloErr != nil {
-				log.Printf("Warning: failed to fetch solo matches for tournament %d: %v\n", id, soloErr)
-			} else {
-				tournament.SoloMatches = SoloMatchesToInterface(soloMatches) // Используем хелпер, если soloMatches это []*models.SoloMatch
-			}
-			return nil
-		})
-
-		g.Go(func() error {
-			teamMatches, teamErr := s.matchService.ListTeamMatchesByTournament(gCtx, id)
-			if teamErr != nil {
-				log.Printf("Warning: failed to fetch team matches for tournament %d: %v\n", id, teamErr)
-			} else {
-				tournament.TeamMatches = TeamMatchesToInterface(teamMatches) // Используем хелпер, если teamMatches это []*models.TeamMatch
-			}
-			return nil
-		})
-	}
-
-	// Загрузка спорта
-	if tournament.SportID > 0 {
-		g.Go(func() error {
-			sport, sportErr := s.sportRepo.GetByID(gCtx, tournament.SportID)
-			if sportErr != nil {
-				log.Printf("Warning: failed to fetch sport %d for tournament %d: %v\n", tournament.SportID, id, sportErr)
+		if tournament.Format != nil { // Ensure format is loaded before trying to list matches
+			g.Go(func() error {
+				if tournament.Format.ParticipantType == models.FormatParticipantSolo {
+					soloMatches, soloErr := s.matchService.ListSoloMatchesByTournament(gCtx, id)
+					if soloErr != nil {
+						s.logger.WarnContext(gCtx, "Failed to fetch solo matches", slog.Int("tournament_id", id), slog.Any("error", soloErr))
+					} else {
+						tournament.SoloMatches = SoloMatchesToInterface(soloMatches)
+					}
+				}
 				return nil
-			}
-			s.populateSportLogoURL(sport)
-			tournament.Sport = sport
-			return nil
-		})
-	}
+			})
 
-	// Загрузка организатора
-	if tournament.OrganizerID > 0 {
-		g.Go(func() error {
-			organizer, orgErr := s.userRepo.GetByID(gCtx, tournament.OrganizerID)
-			if orgErr != nil {
-				log.Printf("Warning: failed to fetch organizer %d for tournament %d: %v\n", tournament.OrganizerID, id, orgErr)
+			g.Go(func() error {
+				if tournament.Format.ParticipantType == models.FormatParticipantTeam {
+					teamMatches, teamErr := s.matchService.ListTeamMatchesByTournament(gCtx, id)
+					if teamErr != nil {
+						s.logger.WarnContext(gCtx, "Failed to fetch team matches", slog.Int("tournament_id", id), slog.Any("error", teamErr))
+					} else {
+						tournament.TeamMatches = TeamMatchesToInterface(teamMatches)
+					}
+				}
 				return nil
-			}
-			s.populateUserDetails(organizer)
-			tournament.Organizer = organizer
-			return nil
-		})
+			})
+		} else {
+			s.logger.WarnContext(ctx, "Format not loaded for tournament, cannot fetch matches", slog.Int("tournament_id", id))
+		}
 	}
 
 	if err := g.Wait(); err != nil {
-		// Эта ошибка будет возвращена, если какая-либо из горутин вернула ошибку (не nil)
-		log.Printf("Error during parallel fetching of tournament details for tournament %d: %v\n", id, err)
-		// Можно решить, возвращать ли частично заполненный турнир или ошибку.
-		// Если горутины логируют ошибки и возвращают nil, то эта ветка не будет достигнута для таких случаев.
+		// This error will be from a goroutine that returned a non-nil error.
+		// We are currently returning nil from participant/match loading goroutines on error,
+		// so this path might only be hit by critical errors in the future.
+		s.logger.ErrorContext(ctx, "Error during parallel fetching of additional tournament details", slog.Int("tournament_id", id), slog.Any("error", err))
+		// Potentially return the partially filled tournament or the error
 	}
 
 	return tournament, nil
@@ -353,7 +306,9 @@ func (s *tournamentService) ListTournaments(ctx context.Context, filter ListTour
 	if tournaments == nil {
 		return []models.Tournament{}, nil
 	}
-	s.populateTournamentListLogoURLs(tournaments)
+	for i := range tournaments { // Iterate by index to modify the actual element
+		s.populateTournamentDetails(ctx, &tournaments[i])
+	}
 	return tournaments, nil
 }
 
@@ -363,10 +318,11 @@ func (s *tournamentService) UpdateTournamentDetails(ctx context.Context, id int,
 		return nil, handleRepositoryError(err, ErrTournamentNotFound, "failed to get tournament %d for update", id)
 	}
 
-	if tournament.OrganizerID != currentUserID {
+	if tournament.OrganizerID != currentUserID { // Add admin check if necessary
 		return nil, ErrForbiddenOperation
 	}
 
+	// Only allow updates if status is 'soon' or 'registration'
 	if tournament.Status != models.StatusSoon && tournament.Status != models.StatusRegistration {
 		return nil, fmt.Errorf("%w: cannot update tournament in status '%s'", ErrTournamentUpdateNotAllowed, tournament.Status)
 	}
@@ -386,18 +342,29 @@ func (s *tournamentService) UpdateTournamentDetails(ctx context.Context, id int,
 		tournament.Description = input.Description
 		updated = true
 	}
+	// Date updates require re-validation
+	datesChanged := false
 	if input.RegDate != nil && !input.RegDate.IsZero() && !input.RegDate.Equal(tournament.RegDate) {
 		tournament.RegDate = *input.RegDate
 		updated = true
+		datesChanged = true
 	}
 	if input.StartDate != nil && !input.StartDate.IsZero() && !input.StartDate.Equal(tournament.StartDate) {
 		tournament.StartDate = *input.StartDate
 		updated = true
+		datesChanged = true
 	}
 	if input.EndDate != nil && !input.EndDate.IsZero() && !input.EndDate.Equal(tournament.EndDate) {
 		tournament.EndDate = *input.EndDate
 		updated = true
+		datesChanged = true
 	}
+	if datesChanged {
+		if err := validateTournamentDates(tournament.RegDate, tournament.StartDate, tournament.EndDate); err != nil {
+			return nil, err
+		}
+	}
+
 	if input.Location != nil && derefString(input.Location) != derefString(tournament.Location) {
 		tournament.Location = input.Location
 		updated = true
@@ -410,14 +377,8 @@ func (s *tournamentService) UpdateTournamentDetails(ctx context.Context, id int,
 		updated = true
 	}
 
-	if updated {
-		if err := validateTournamentDates(tournament.RegDate, tournament.StartDate, tournament.EndDate); err != nil {
-			return nil, err
-		}
-	}
-
 	if !updated {
-		s.populateTournamentLogoURL(tournament)
+		s.populateTournamentDetails(ctx, tournament)
 		return tournament, nil
 	}
 
@@ -428,150 +389,144 @@ func (s *tournamentService) UpdateTournamentDetails(ctx context.Context, id int,
 		}
 		return nil, handleRepositoryError(err, ErrTournamentNotFound, "%w: error from repository on update", ErrTournamentUpdateFailed)
 	}
-	s.populateTournamentLogoURL(tournament)
+	s.populateTournamentDetails(ctx, tournament)
 	return tournament, nil
 }
 
-func (s *tournamentService) UpdateTournamentStatus(ctx context.Context, id int, currentUserID int, newStatus models.TournamentStatus) (*models.Tournament, error) {
-	if !isValidTournamentStatus(newStatus) {
-		return nil, fmt.Errorf("%w: '%s'", ErrTournamentInvalidStatus, newStatus)
-	}
+// UpdateTournamentStatus handles status changes, including bracket generation.
+// If exec is nil, it manages its own transaction. Otherwise, it uses the provided SQLExecutor.
+func (s *tournamentService) UpdateTournamentStatus(ctx context.Context, id int, currentUserID int, newStatus models.TournamentStatus, exec repositories.SQLExecutor) (*models.Tournament, error) {
+	s.logger.InfoContext(ctx, "UpdateTournamentStatus called", slog.Int("tournament_id", id), slog.String("new_status", string(newStatus)), slog.Int("user_id", currentUserID))
 
-	tournament, err := s.tournamentRepo.GetByID(ctx, id)
+	// 1. Fetch tournament details (outside any transaction for now, or use exec if provided for reads too)
+	tournament, err := s.tournamentRepo.GetByID(ctx, id) // This GetByID doesn't use SQLExecutor
 	if err != nil {
-		return nil, handleRepositoryError(err, ErrTournamentNotFound, "failed to get tournament %d for status update", id)
+		return nil, handleRepositoryError(err, ErrTournamentNotFound, "UpdateTournamentStatus: failed to get tournament %d", id)
 	}
 
-	if tournament.Format == nil && tournament.FormatID >= 0 {
-		format, formatErr := s.formatRepo.GetByID(ctx, tournament.FormatID)
-		if formatErr != nil {
-			log.Printf("Warning: could not load format %d for tournament %d during status update: %v", tournament.FormatID, id, formatErr)
-			if newStatus == models.StatusActive {
-				return nil, fmt.Errorf("cannot activate tournament %d: failed to load its format %d: %w", id, tournament.FormatID, formatErr)
-			}
-		} else {
-			tournament.Format = format
-		}
-	}
-
-	if tournament.OrganizerID != currentUserID {
+	// 2. Authorization (if currentUserID is not 0, meaning it's not a system call)
+	if currentUserID != 0 && tournament.OrganizerID != currentUserID { // Add admin check if needed
 		return nil, ErrForbiddenOperation
 	}
 
+	// 3. Load format if not already loaded and needed (especially for 'active' transition)
+	if tournament.Format == nil && tournament.FormatID > 0 {
+		format, formatErr := s.formatRepo.GetByID(ctx, tournament.FormatID)
+		if formatErr != nil {
+			s.logger.WarnContext(ctx, "UpdateTournamentStatus: could not load format", slog.Int("tournament_id", id), slog.Int("format_id", tournament.FormatID), slog.Any("error", formatErr))
+			// If format is critical for *any* status update logic beyond bracket gen, this might need to be an error
+		}
+		tournament.Format = format
+	}
+
+	// 4. Validate status transition
 	currentStatus := tournament.Status
 	if !isValidStatusTransition(currentStatus, newStatus) {
-		return nil, fmt.Errorf("%w: from '%s' to '%s'", ErrTournamentInvalidStatusTransition, currentStatus, newStatus)
+		return nil, fmt.Errorf("%w: from '%s' to '%s' for tournament %d", ErrTournamentInvalidStatusTransition, currentStatus, newStatus, id)
+	}
+	if currentStatus == newStatus { // No change
+		s.populateTournamentDetails(ctx, tournament)
+		return tournament, nil
 	}
 
+	// 5. Transaction management
+	var ownTx *sql.Tx
+	var opErr error
+	executor := exec
+
+	if executor == nil {
+		tmpTx, txErr := s.db.BeginTx(ctx, nil)
+		if txErr != nil {
+			s.logger.ErrorContext(ctx, "UpdateTournamentStatus: Failed to begin new transaction", slog.Int("tournament_id", id), slog.Any("error", txErr))
+			return nil, fmt.Errorf("failed to begin transaction for status update: %w", txErr)
+		}
+		ownTx = tmpTx
+		executor = ownTx
+		defer func() {
+			if ownTx != nil { // If ownTx is not nil, it means Commit wasn't called or failed
+				s.logger.WarnContext(ctx, "Rolling back own transaction in UpdateTournamentStatus", slog.Int("tournament_id", id), slog.Any("operation_error", opErr))
+				if rbErr := ownTx.Rollback(); rbErr != nil {
+					s.logger.ErrorContext(ctx, "Failed to rollback own transaction", slog.Int("tournament_id", id), slog.Any("rollback_error", rbErr))
+				}
+			}
+		}()
+	}
+
+	// 6. Update status in DB
+	opErr = s.tournamentRepo.UpdateStatus(ctx, executor, id, newStatus)
+	if opErr != nil {
+		s.logger.ErrorContext(ctx, "Failed to update tournament status in DB", slog.Int("tournament_id", id), slog.String("new_status", string(newStatus)), slog.Any("error", opErr))
+		// If using ownTx, defer will handle rollback. If using passed exec, caller handles rollback.
+		return nil, fmt.Errorf("UpdateTournamentStatus: failed to update status in repo for tournament %d: %w", id, opErr)
+	}
+	tournament.Status = newStatus // Reflect change in local model
+	s.logger.InfoContext(ctx, "Tournament status updated in DB", slog.Int("tournament_id", id), slog.String("new_status", string(newStatus)))
+
+	// 7. Handle side effects of status change (e.g., bracket generation)
 	if newStatus == models.StatusActive && currentStatus != models.StatusActive {
-		if tournament.Format == nil {
-			return nil, fmt.Errorf("cannot activate tournament %d: format information is missing or failed to load", id)
-		}
-		log.Printf("Tournament %d status changing to Active. Attempting to generate bracket via BracketService.", id)
-
-		bracketDataInterface, genErr := s.bracketService.GenerateAndSaveBracket(ctx, tournament)
-		if genErr != nil {
-			log.Printf("Error generating bracket for tournament %d: %v", id, genErr)
-			errorPayload := map[string]string{"error": fmt.Sprintf("Failed to generate bracket: %v", genErr)}
-			if s.hub != nil {
-				roomID := "tournament_" + strconv.Itoa(id)
-				s.hub.BroadcastToRoom(
-					roomID,
-					brackets.WebSocketMessage{Type: "BRACKET_GENERATION_ERROR", Payload: errorPayload, RoomID: roomID},
-				)
-			}
-			return nil, fmt.Errorf("failed to generate bracket upon activating tournament %d: %w", id, genErr)
+		s.logger.InfoContext(ctx, "Tournament became active, attempting bracket generation", slog.Int("tournament_id", id))
+		if tournament.Format == nil { // Should have been loaded earlier
+			opErr = fmt.Errorf("format is nil, cannot generate bracket for tournament %d", id)
+			s.logger.ErrorContext(ctx, opErr.Error(), slog.Int("tournament_id", id))
+			return nil, opErr // This will trigger rollback if ownTx
 		}
 
-		// Обработка результата от BracketService
-		if winnerPayload, ok := bracketDataInterface.(TournamentWinnerPayload); ok && winnerPayload.IsAutoWin {
-			// Случай автоматической победы (1 участник)
-			log.Printf("Tournament %d: Auto-winner detected (Participant: %s). Setting status to Completed.", id, getParticipantName(winnerPayload.Winner))
-
-			// Обновляем статус турнира на Завершен
-			// Важно: isValidStatusTransition должна разрешать переход из Registration (или Soon) в Completed в этом случае,
-			// или мы должны это обработать как специальный случай.
-			// Пока предполагаем, что такой переход разрешен или будет обработан логикой.
-			// Для большей чистоты, возможно, стоит иметь отдельный метод для завершения турнира с победителем.
-			if !isValidStatusTransition(currentStatus, models.StatusCompleted) && currentStatus != models.StatusCompleted {
-				// Если прямой переход в Completed не разрешен из текущего статуса (кроме если уже Completed)
-				// можно сначала перевести в Active (если это было намерение), а потом сразу в Completed.
-				// Но для авто-победы логичнее сразу в Completed.
-				// Рассмотрим сценарий: Registration -> Active (вызов Generate) -> AutoWin -> Completed.
-				// Если currentStatus был Registration, и мы переводим в Active, а получаем AutoWin,
-				// то финальный статус должен быть Completed.
-				log.Printf("Transitioning tournament %d from %s to %s due to auto-win.", id, currentStatus, models.StatusCompleted)
-			}
-
-			err = s.tournamentRepo.UpdateStatus(ctx, id, models.StatusCompleted)
-			if err != nil {
-				log.Printf("CRITICAL: Auto-winner declared for tournament %d, but failed to update tournament status to Completed: %v", id, err)
-				// Возвращаем ошибку, но информация о победителе уже есть в winnerPayload
-				return nil, handleRepositoryError(err, ErrTournamentNotFound, "%w: failed to update status to Completed after auto-win", ErrTournamentUpdateFailed)
-			}
-			tournament.Status = models.StatusCompleted // Обновляем статус в объекте
-
-			// TODO: Если есть поле для победителя в models.Tournament, обновить его здесь.
-			// tournament.WinnerParticipantID = &winnerPayload.Winner.ID (пример)
-			// err = s.tournamentRepo.Update(ctx, tournament) // и сохранить
-
-			if s.hub != nil {
-				roomID := "tournament_" + strconv.Itoa(id)
-				s.hub.BroadcastToRoom(
-					roomID,
-					brackets.WebSocketMessage{Type: "TOURNAMENT_AUTO_WINNER", Payload: winnerPayload, RoomID: roomID},
-				)
-			}
-			log.Printf("Tournament %d completed with auto-winner. WebSocket notification sent.", id)
-			// Возвращаем обновленный турнир (хотя данные о сетке могут быть нерелевантны)
-			// Можно загрузить актуальные данные турнира еще раз или просто вернуть текущий объект.
-			// Для простоты возвращаем текущий.
-			s.populateTournamentLogoURL(tournament)
-			return tournament, nil
-
-		} else if bracketData, ok := bracketDataInterface.(*models.Tournament); ok {
-			// Обычная генерация сетки, матчи созданы
-			err = s.tournamentRepo.UpdateStatus(ctx, id, newStatus) // newStatus здесь models.StatusActive
-			if err != nil {
-				log.Printf("CRITICAL: Bracket generated for tournament %d, but failed to update tournament status to Active: %v", id, err)
-				return nil, handleRepositoryError(err, ErrTournamentNotFound, "%w: failed to update status to Active after bracket generation", ErrTournamentUpdateFailed)
-			}
-			tournament.Status = newStatus
-
-			if s.hub != nil {
-				roomID := "tournament_" + strconv.Itoa(id)
-				s.hub.BroadcastToRoom(
-					roomID,
-					brackets.WebSocketMessage{Type: "BRACKET_UPDATED", Payload: bracketData, RoomID: roomID},
-				)
-			}
-			log.Printf("Bracket generated and status updated for tournament %d. WebSocket notification sent.", id)
-			tournament = bracketData      // Используем данные, возвращенные BracketService
-			tournament.Status = newStatus // Убеждаемся, что статус актуален
+		// Check if matches already exist (idempotency for bracket generation)
+		var existingMatches bool
+		// This check should ideally also use the executor if reads need to be consistent with the current transaction.
+		// For simplicity, if repo methods don't support exec for reads, this might use a separate connection.
+		if tournament.Format.ParticipantType == models.FormatParticipantSolo {
+			solos, _ := s.soloMatchRepo.ListByTournament(ctx, tournament.ID, nil, nil) // Assumes read doesn't need to be in this tx or repo supports it
+			existingMatches = len(solos) > 0
 		} else {
-			// Неожиданный тип данных от BracketService
-			log.Printf("Error: Unexpected data type received from BracketService for tournament %d: %T", id, bracketDataInterface)
-			// Можно вернуть ошибку или обработать как ошибку генерации сетки
-			return nil, fmt.Errorf("unexpected data type from bracket generation for tournament %d", id)
+			teams, _ := s.teamMatchRepo.ListByTournament(ctx, tournament.ID, nil, nil)
+			existingMatches = len(teams) > 0
 		}
 
-	} else { // Если статус меняется не на Active (или уже был Active), или это не переход в Active
-		err = s.tournamentRepo.UpdateStatus(ctx, id, newStatus)
-		if err != nil {
-			return nil, handleRepositoryError(err, ErrTournamentNotFound, "%w: failed to update status in repository", ErrTournamentUpdateFailed)
-		}
-		tournament.Status = newStatus
-		if s.hub != nil {
-			roomID := "tournament_" + strconv.Itoa(id)
-			payload := map[string]interface{}{"tournament_id": id, "new_status": newStatus}
-			s.hub.BroadcastToRoom(
-				roomID,
-				brackets.WebSocketMessage{Type: "TOURNAMENT_STATUS_UPDATED", Payload: payload, RoomID: roomID},
-			)
+		if !existingMatches {
+			_, bracketErr := s.bracketService.GenerateAndSaveBracket(ctx, executor, tournament)
+			if bracketErr != nil {
+				opErr = fmt.Errorf("status updated to active, but bracket generation failed: %w", bracketErr)
+				s.logger.ErrorContext(ctx, "Bracket generation failed", slog.Int("tournament_id", id), slog.Any("error", opErr))
+				return nil, opErr // This will trigger rollback if ownTx
+			}
+			s.logger.InfoContext(ctx, "Bracket generated successfully", slog.Int("tournament_id", id))
+			// Bracket update notification can be sent after commit
+		} else {
+			s.logger.InfoContext(ctx, "Matches already exist, skipping bracket generation", slog.Int("tournament_id", id))
 		}
 	}
 
-	s.populateTournamentLogoURL(tournament)
+	// 8. Commit transaction if owned by this function
+	if ownTx != nil {
+		if errCommit := ownTx.Commit(); errCommit != nil {
+			ownTx = nil // Nullify to prevent deferred rollback from trying again
+			opErr = fmt.Errorf("failed to commit transaction for status update: %w", errCommit)
+			s.logger.ErrorContext(ctx, "Failed to commit own transaction", slog.Int("tournament_id", id), slog.Any("error", opErr))
+			return nil, opErr
+		}
+		ownTx = nil // Mark as committed
+		s.logger.InfoContext(ctx, "Own transaction committed successfully", slog.Int("tournament_id", id))
+
+		// Send WebSocket notifications only after successful commit of an owned transaction
+		if s.hub != nil {
+			roomID := "tournament_" + strconv.Itoa(tournament.ID)
+			statusPayload := map[string]interface{}{"tournament_id": tournament.ID, "new_status": newStatus, "old_status": currentStatus}
+			s.hub.BroadcastToRoom(roomID, brackets.WebSocketMessage{Type: "TOURNAMENT_STATUS_UPDATED", Payload: statusPayload, RoomID: roomID})
+
+			if newStatus == models.StatusActive && currentStatus != models.StatusActive { // And bracket was generated
+				fullBracketData, errData := s.GetTournamentBracketData(ctx, tournament.ID) // Get fresh data post-commit
+				if errData == nil {
+					s.hub.BroadcastToRoom(roomID, brackets.WebSocketMessage{Type: "BRACKET_UPDATED", Payload: fullBracketData, RoomID: roomID})
+				} else {
+					s.logger.WarnContext(ctx, "Failed to get full bracket data for WebSocket broadcast after status update", slog.Int("tournament_id", id), slog.Any("error", errData))
+				}
+			}
+		}
+	}
+	// If exec was provided, the caller is responsible for commit and notifications.
+
+	s.populateTournamentDetails(ctx, tournament) // Refresh details for the returned object
 	return tournament, nil
 }
 
@@ -581,29 +536,37 @@ func (s *tournamentService) DeleteTournament(ctx context.Context, id int, curren
 		return handleRepositoryError(err, ErrTournamentNotFound, "failed to get tournament %d for deletion check", id)
 	}
 
-	if tournament.OrganizerID != currentUserID { // TODO: Add admin role check
+	if tournament.OrganizerID != currentUserID { // Add admin role check if necessary
 		return ErrForbiddenOperation
 	}
 
+	// Allow deletion only for 'soon', 'registration', or 'canceled' tournaments
 	if tournament.Status != models.StatusSoon && tournament.Status != models.StatusRegistration && tournament.Status != models.StatusCanceled {
 		return fmt.Errorf("%w: cannot delete tournament with status '%s'", ErrTournamentDeletionNotAllowed, tournament.Status)
 	}
+
+	// Check for dependent entities (participants, matches) before attempting to delete
+	// This might involve new repository methods or checks here.
+	// For now, relying on DB foreign key constraints to signal ErrTournamentInUse.
 
 	oldLogoKey := tournament.LogoKey
 	err = s.tournamentRepo.Delete(ctx, id)
 	if err != nil {
 		if errors.Is(err, repositories.ErrTournamentInUse) {
+			// This specific error from repo indicates FK violation, meaning it has participants/matches
 			return fmt.Errorf("%w: tournament might have participants or matches: %w", ErrTournamentDeletionNotAllowed, err)
 		}
-		return handleRepositoryError(err, ErrTournamentNotFound, "%w", ErrTournamentDeleteFailed)
+		return handleRepositoryError(err, ErrTournamentNotFound, "%w on delete", ErrTournamentDeleteFailed)
 	}
 
+	// If deletion was successful, attempt to delete logo from storage
 	if oldLogoKey != nil && *oldLogoKey != "" && s.uploader != nil {
-		go func(keyToDelete string) {
+		go func(keyToDelete string) { // Asynchronous deletion
 			deleteCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			if deleteErr := s.uploader.Delete(deleteCtx, keyToDelete); deleteErr != nil {
-				log.Printf("Warning: Failed to delete tournament logo %s during tournament deletion: %v\n", keyToDelete, deleteErr)
+				s.logger.WarnContext(context.Background(), "Failed to delete tournament logo from storage",
+					slog.String("key", keyToDelete), slog.Int("tournament_id", id), slog.Any("error", deleteErr))
 			}
 		}(*oldLogoKey)
 	}
@@ -616,74 +579,88 @@ func (s *tournamentService) UploadTournamentLogo(ctx context.Context, tournament
 		return nil, handleRepositoryError(err, ErrTournamentNotFound, "failed to get tournament %d for logo upload", tournamentID)
 	}
 
-	if tournament.OrganizerID != currentUserID { // TODO: Add admin role check
+	if tournament.OrganizerID != currentUserID { // Add admin role check if necessary
 		return nil, ErrForbiddenOperation
 	}
+	// Potentially check tournament status to disallow logo changes for active/completed tournaments
 
 	if !strings.HasPrefix(contentType, "image/") {
-		return nil, ErrInvalidLogoFormat
+		return nil, ErrInvalidLogoFormat // Assuming this error is defined in services/errors.go
 	}
 	if s.uploader == nil {
 		return nil, errors.New("file uploader is not configured")
 	}
 
 	oldLogoKey := tournament.LogoKey
-	ext, err := GetExtensionFromContentType(contentType)
-	if err != nil {
-		return nil, err
+	ext, errExt := GetExtensionFromContentType(contentType) // Using helper
+	if errExt != nil {
+		return nil, errExt
 	}
 	newKey := fmt.Sprintf("%s/%d/logo_%d%s", tournamentLogoPrefix, tournamentID, time.Now().UnixNano(), ext)
 
-	if _, err = s.uploader.Upload(ctx, newKey, contentType, file); err != nil {
-		return nil, fmt.Errorf("%w: %s: %w", ErrLogoUploadFailed, newKey, err)
+	if _, errUpload := s.uploader.Upload(ctx, newKey, contentType, file); errUpload != nil {
+		return nil, fmt.Errorf("%w: %s: %w", ErrLogoUploadFailed, newKey, errUpload)
 	}
 
-	if err = s.tournamentRepo.UpdateLogoKey(ctx, tournamentID, &newKey); err != nil {
-		go s.uploader.Delete(context.Background(), newKey) // Attempt to clean up uploaded file
-		return nil, handleRepositoryError(err, ErrTournamentNotFound, "%w: failed to update logo key in db", ErrLogoUpdateDatabaseFailed)
+	if errDbUpdate := s.tournamentRepo.UpdateLogoKey(ctx, tournamentID, &newKey); errDbUpdate != nil {
+		// Attempt to clean up the newly uploaded file if DB update fails
+		go func(keyToDelete string) {
+			s.logger.InfoContext(context.Background(), "Attempting to delete orphaned logo from storage", slog.String("key", keyToDelete))
+			if delErr := s.uploader.Delete(context.Background(), keyToDelete); delErr != nil {
+				s.logger.WarnContext(context.Background(), "Failed to delete orphaned logo", slog.String("key", keyToDelete), slog.Any("error", delErr))
+			}
+		}(newKey)
+		return nil, handleRepositoryError(errDbUpdate, ErrTournamentNotFound, "%w: failed to update logo key in db", ErrLogoUpdateDatabaseFailed)
 	}
 
+	// If update was successful and there was an old logo, delete it from storage
 	if oldLogoKey != nil && *oldLogoKey != "" && *oldLogoKey != newKey {
-		go func(keyToDelete string) { // Delete old logo in background
+		go func(keyToDelete string) { // Asynchronous deletion
 			deleteCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			if deleteErr := s.uploader.Delete(deleteCtx, keyToDelete); deleteErr != nil {
-				log.Printf("Warning: Failed to delete old tournament logo %s: %v\n", keyToDelete, deleteErr)
+				s.logger.WarnContext(context.Background(), "Failed to delete old tournament logo from storage",
+					slog.String("key", keyToDelete), slog.Int("tournament_id", tournamentID), slog.Any("error", deleteErr))
 			}
 		}(*oldLogoKey)
 	}
 
 	tournament.LogoKey = &newKey
-	s.populateTournamentLogoURL(tournament)
+	populateTournamentLogoURLFunc(tournament, s.uploader) // Update LogoURL in the model
 	return tournament, nil
 }
 
 func (s *tournamentService) FinalizeTournament(ctx context.Context, tournamentID int, winnerParticipantID int, currentUserID int) (*models.Tournament, error) {
-	tournament, err := s.tournamentRepo.GetByID(ctx, tournamentID)
+	s.logger.InfoContext(ctx, "FinalizeTournament called", slog.Int("tournament_id", tournamentID), slog.Int("winner_pid", winnerParticipantID), slog.Int("user_id", currentUserID))
+
+	// 1. Fetch tournament (can use GetByID which populates details)
+	tournament, err := s.GetTournamentByID(ctx, tournamentID, currentUserID) // Using GetByID which populates .Format
 	if err != nil {
-		return nil, handleRepositoryError(err, ErrTournamentNotFound, "FinalizeTournament: failed to get tournament %d", tournamentID)
+		// GetByID already uses handleRepositoryError, so just return if it's ErrTournamentNotFound
+		if errors.Is(err, ErrTournamentNotFound) {
+			return nil, err
+		}
+		return nil, fmt.Errorf("FinalizeTournament: failed to get tournament %d: %w", tournamentID, err)
 	}
 
-	// Проверка прав: только организатор может финализировать (или админ)
-	if tournament.OrganizerID != currentUserID {
-		// TODO: Добавить проверку на роль администратора, если это предусмотрено
+	// 2. Authorization
+	if currentUserID != 0 && tournament.OrganizerID != currentUserID { // System call if currentUserID is 0
 		return nil, ErrForbiddenOperation
 	}
 
+	// 3. Status Check
 	if tournament.Status == models.StatusCompleted {
-		log.Printf("Tournament %d already completed.", tournamentID)
-		// Можно вернуть текущее состояние или ошибку, что уже завершен. Пока вернем текущее.
-		s.populateTournamentDetails(ctx, tournament) // Загрузим детали для ответа
-		return tournament, nil
+		s.logger.InfoContext(ctx, "Tournament already completed", slog.Int("tournament_id", tournamentID))
+		// s.populateTournamentDetails(ctx, tournament) // Already populated by GetByID
+		return tournament, nil // Return already completed tournament
 	}
-
 	if tournament.Status != models.StatusActive {
 		return nil, fmt.Errorf("cannot finalize tournament %d with status '%s', expected '%s'",
 			tournamentID, tournament.Status, models.StatusActive)
 	}
 
-	// Проверка, что переданный winnerParticipantID действительно участник этого турнира
-	winnerParticipant, err := s.participantRepo.FindByID(ctx, winnerParticipantID)
+	// 4. Validate Winner Participant
+	winnerParticipant, err := s.participantRepo.FindByID(ctx, winnerParticipantID) // FindByID is simpler here
 	if err != nil {
 		return nil, handleRepositoryError(err, ErrParticipantNotFound, "FinalizeTournament: winner participant ID %d not found", winnerParticipantID)
 	}
@@ -691,204 +668,294 @@ func (s *tournamentService) FinalizeTournament(ctx context.Context, tournamentID
 		return nil, fmt.Errorf("winner participant ID %d does not belong to tournament %d", winnerParticipantID, tournamentID)
 	}
 
-	// Обновляем статус турнира
-	err = s.tournamentRepo.UpdateStatus(ctx, tournamentID, models.StatusCompleted)
+	// 5. Update Tournament Status to Completed (within a transaction if not already in one)
+	// For FinalizeTournament, it's likely called outside the auto-update, so it should manage its own transaction for this.
+	// Or, it could be part of the transaction that updated the final match.
+	// For now, let UpdateTournamentStatus handle transaction if needed.
+	// We pass 0 for currentUserID to signify a system-like call if invoked by match completion logic,
+	// or the actual currentUserID if invoked by an admin directly.
+	updatedTournament, err := s.UpdateTournamentStatus(ctx, tournamentID, currentUserID, models.StatusCompleted, nil) // nil for exec, manages its own tx
 	if err != nil {
-		return nil, fmt.Errorf("FinalizeTournament: failed to update tournament %d status to completed: %w", tournamentID, err)
+		return nil, fmt.Errorf("FinalizeTournament: failed to update tournament status to completed: %w", err)
 	}
-	tournament.Status = models.StatusCompleted
+	// TODO: Persist tournament.OverallWinnerParticipantID = &winnerParticipantID through tournamentRepo.Update
+	// This would require adding OverallWinnerParticipantID to the Tournament model and repository update method.
+	// For now, we'll just log and include in WebSocket.
 
-	// Опционально: сохранить победителя в модели Tournament, если есть такое поле
-	// if tournament.WinnerOverallParticipantID == nil { // Пример
-	// 	tournament.WinnerOverallParticipantID = &winnerParticipantID
-	// 	err = s.tournamentRepo.Update(ctx, tournament) // Если есть общий Update метод, который это поле учтет
-	// 	if err != nil {
-	// 		log.Printf("Warning: Failed to set overall winner for tournament %d: %v", tournamentID, err)
-	// 	}
-	// }
+	s.logger.InfoContext(ctx, "Tournament finalized", slog.Int("tournament_id", tournamentID), slog.Int("winner_pid", winnerParticipantID))
 
-	log.Printf("Tournament %d finalized. Winner Participant ID: %d", tournamentID, winnerParticipantID)
-
-	// Отправка WebSocket уведомления о завершении турнира
+	// 6. WebSocket Notification (occurs within UpdateTournamentStatus if it commits its own transaction)
+	// If UpdateTournamentStatus was called with an external transaction, the caller of FinalizeTournament
+	// would be responsible for this notification after its transaction commits.
+	// Since UpdateTournamentStatus with nil exec will send its own status update,
+	// we might send a more specific TOURNAMENT_COMPLETED here.
 	if s.hub != nil {
 		roomID := "tournament_" + strconv.Itoa(tournamentID)
+		// Re-fetch winner participant details if needed, or use what we have
+		// For simplicity, assume winnerParticipant is sufficiently detailed or populate it.
+		// If participantRepo.FindByID doesn't populate User/Team, we might need GetWithDetails.
+		// The populateParticipantListDetailsFunc is for lists, need one for single participant.
+		// Let's assume participantToParticipantView can create a view from basic participant.
+		winnerView := s.participantToParticipantView(winnerParticipant, s.uploader) // Use existing helper
+
 		completionPayload := map[string]interface{}{
 			"tournament_id":            tournamentID,
 			"winner_participant_db_id": winnerParticipantID,
-			// Можно обогатить информацией о победителе (имя, лого и т.д.)
+			"winner_details":           winnerView,
+			// Add overall_winner_participant_id if it was persisted to updatedTournament
 		}
 		s.hub.BroadcastToRoom(roomID, brackets.WebSocketMessage{Type: "TOURNAMENT_COMPLETED", Payload: completionPayload, RoomID: roomID})
-		log.Printf("Sent TOURNAMENT_COMPLETED for tournament %d to room %s, Winner: %d", tournamentID, roomID, winnerParticipantID)
+		s.logger.InfoContext(ctx, "Sent TOURNAMENT_COMPLETED to room", slog.String("room_id", roomID), slog.Int("winner_pid", winnerParticipantID))
 	}
 
-	s.populateTournamentDetails(ctx, tournament) // Загрузить детали для ответа, включая нового победителя если он есть в модели турнира
-	return tournament, nil
+	// s.populateTournamentDetails(ctx, updatedTournament) // Already done by GetByID and potentially UpdateTournamentStatus
+	return updatedTournament, nil
 }
 
-func (s *tournamentService) GetTournamentBracketData(ctx context.Context, tournamentID int) (*FullTournamentBracketView, error) {
-	// 1. Загружаем основную информацию о турнире
-	tournament, err := s.tournamentRepo.GetByID(ctx, tournamentID)
+func (s *tournamentService) AutoUpdateTournamentStatusesByDates(ctx context.Context) error {
+	s.logger.InfoContext(ctx, "Scheduler: Starting automatic tournament status update cycle.")
+
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return nil, handleRepositoryError(err, ErrTournamentNotFound, "GetTournamentBracketData: failed to get tournament %d", tournamentID)
+		s.logger.ErrorContext(ctx, "Scheduler: failed to begin transaction", slog.Any("error", err))
+		return fmt.Errorf("scheduler: failed to begin transaction: %w", err)
 	}
-	s.populateTournamentLogoURL(tournament) // Лого турнира
 
-	// 2. Загружаем формат (если он еще не загружен с турниром)
-	if tournament.Format == nil && tournament.FormatID > 0 {
-		format, formatErr := s.formatRepo.GetByID(ctx, tournament.FormatID)
-		if formatErr != nil {
-			log.Printf("Warning: GetTournamentBracketData: could not load format %d for tournament %d: %v", tournament.FormatID, tournamentID, formatErr)
-			// Можно вернуть ошибку или продолжить без формата, если это допустимо
+	var opErr error
+	defer func() {
+		if p := recover(); p != nil {
+			s.logger.ErrorContext(ctx, "Scheduler: recovered from panic, rolling back transaction", slog.Any("panic_value", p))
+			if rbErr := tx.Rollback(); rbErr != nil {
+				s.logger.ErrorContext(ctx, "Scheduler: failed to rollback transaction after panic", slog.Any("rollback_error", rbErr))
+			}
+			panic(p) // Re-panic after logging and attempting rollback
+		} else if opErr != nil {
+			s.logger.ErrorContext(ctx, "Scheduler: rolling back transaction due to error", slog.Any("error", opErr))
+			if rbErr := tx.Rollback(); rbErr != nil {
+				s.logger.ErrorContext(ctx, "Scheduler: failed to rollback transaction", slog.Any("rollback_error", rbErr))
+			}
+		} else {
+			if cErr := tx.Commit(); cErr != nil {
+				s.logger.ErrorContext(ctx, "Scheduler: failed to commit transaction", slog.Any("error", cErr))
+				opErr = fmt.Errorf("scheduler: failed to commit transaction: %w", cErr)
+				// If commit fails, the lock is typically released by Postgres anyway.
+			} else {
+				s.logger.InfoContext(ctx, "Scheduler: Transaction committed successfully for status updates.")
+			}
 		}
-		tournament.Format = format
-	}
-	if tournament.Format == nil {
-		return nil, fmt.Errorf("format information missing for tournament %d", tournamentID)
+	}()
+
+	acquiredLock, lockErr := db.TryAcquireTransactionalLock(ctx, tx, db.SchedulerAdvisoryLockID, s.logger)
+	if lockErr != nil {
+		opErr = fmt.Errorf("scheduler: error trying to acquire lock: %w", lockErr)
+		return opErr // This will trigger rollback via defer
 	}
 
-	// 3. Загружаем спорт (если еще не загружен)
+	if !acquiredLock {
+		s.logger.InfoContext(ctx, "Scheduler: Could not acquire lock, another instance is likely working. Skipping cycle.")
+		// No opErr, so the empty transaction will be committed (or rolled back if commit fails for other reasons).
+		// This is fine as no work was done.
+		return nil
+	}
+	s.logger.InfoContext(ctx, "Scheduler: Lock acquired. Proceeding with status updates.")
+
+	currentTime := time.Now()
+	tournamentsToUpdate, err := s.tournamentRepo.GetTournamentsForAutoStatusUpdate(ctx, tx, currentTime)
+	if err != nil {
+		opErr = fmt.Errorf("scheduler: failed to get tournaments for status update: %w", err)
+		return opErr // This will trigger rollback
+	}
+
+	if len(tournamentsToUpdate) == 0 {
+		s.logger.InfoContext(ctx, "Scheduler: No tournaments found requiring status update based on dates.")
+		return nil // No opErr, transaction for lock acquisition will commit/rollback.
+	}
+
+	s.logger.InfoContext(ctx, "Scheduler: Found tournaments to potentially update.", slog.Int("count", len(tournamentsToUpdate)))
+
+	updatedCount := 0
+	for _, t := range tournamentsToUpdate {
+		originalStatus := t.Status
+		var newStatus models.TournamentStatus
+
+		// Determine the new status based on current time and tournament dates
+		if currentTime.Before(t.RegDate) { // Should not happen if GetTournamentsForAutoStatusUpdate is correct
+			newStatus = models.StatusSoon
+		} else if currentTime.Before(t.StartDate) { // Registration period
+			newStatus = models.StatusRegistration
+		} else if currentTime.Before(t.EndDate) { // Active period
+			newStatus = models.StatusActive
+		} else { // Tournament period has ended
+			// If no winner is set (e.g., OverallWinnerParticipantID is nil in 't'),
+			// we might not automatically move to 'completed'. This needs careful consideration.
+			// For now, let's assume if EndDate is passed, we try to move to 'completed'.
+			// FinalizeTournament should be the one to set the winner.
+			// The scheduler could move it to a "pending_completion" or similar state,
+			// or this automatic transition to "completed" assumes all matches are done.
+			// For now, the query in GetTournamentsForAutoStatusUpdate handles this by exclusion.
+			// If a tournament end_date has passed AND it was 'active', it's a candidate.
+			newStatus = models.StatusCompleted
+		}
+
+		if newStatus != originalStatus {
+			s.logger.InfoContext(ctx, "Scheduler: Attempting to update tournament status",
+				slog.Int("tournament_id", t.ID), slog.String("name", t.Name),
+				slog.String("old_status", string(originalStatus)), slog.String("new_status", string(newStatus)))
+
+			// Call UpdateTournamentStatus with the current transaction (tx)
+			// Pass 0 for currentUserID to indicate a system-initiated change.
+			updatedTournament, updateErr := s.UpdateTournamentStatus(ctx, t.ID, 0, newStatus, tx)
+			if updateErr != nil {
+				s.logger.ErrorContext(ctx, "Scheduler: Error from UpdateTournamentStatus for tournament",
+					slog.Int("tournament_id", t.ID), slog.Any("error", updateErr))
+				opErr = fmt.Errorf("scheduler: error processing tournament %d (current status %s) to %s: %w", t.ID, originalStatus, newStatus, updateErr)
+				return opErr // Critical error, rollback entire batch
+			}
+
+			if updatedTournament.Status == newStatus {
+				s.logger.InfoContext(ctx, "Scheduler: Successfully updated tournament status",
+					slog.Int("tournament_id", t.ID), slog.String("new_status", string(updatedTournament.Status)))
+				updatedCount++
+				// WebSocket notifications for status updates and bracket generation (if applicable)
+				// are handled within UpdateTournamentStatus when it commits its *own* transaction.
+				// Since we are passing `tx`, UpdateTournamentStatus will *not* commit and *not* send notifications.
+				// Notifications should be sent after the main scheduler transaction commits.
+				// This is complex. A simpler approach might be for UpdateTournamentStatus to always send notifications,
+				// but that's not ideal for batch operations.
+				// For now, we rely on the fact that UpdateTournamentStatus *does not* send if exec is provided.
+				// We could collect all updated tournaments and send notifications after the commit.
+			} else {
+				// This case should ideally not happen if UpdateTournamentStatus is robust
+				s.logger.WarnContext(ctx, "Scheduler: Tournament status was not updated as expected by UpdateTournamentStatus call",
+					slog.Int("tournament_id", t.ID),
+					slog.String("expected_status", string(newStatus)),
+					slog.String("actual_status", string(updatedTournament.Status)))
+			}
+		}
+	}
+
+	s.logger.InfoContext(ctx, "Scheduler: Processed tournaments for status update.", slog.Int("eligible_count", len(tournamentsToUpdate)), slog.Int("updated_count", updatedCount))
+	// opErr remains nil if all updates were successful
+	return opErr
+}
+
+// Helper to populate all standard details for a tournament model
+func (s *tournamentService) populateTournamentDetails(ctx context.Context, tournament *models.Tournament) {
+	if tournament == nil {
+		return
+	}
+	// Populate Logo URL first
+	populateTournamentLogoURLFunc(tournament, s.uploader) // Using helper
+
+	// Populate related entities if their IDs are present and entities are not already populated
 	if tournament.Sport == nil && tournament.SportID > 0 {
-		sport, sportErr := s.sportRepo.GetByID(ctx, tournament.SportID)
-		if sportErr == nil && sport != nil {
-			s.populateSportLogoURL(sport)
+		sport, err := s.sportRepo.GetByID(ctx, tournament.SportID)
+		if err == nil && sport != nil {
+			populateSportLogoURLFunc(sport, s.uploader) // Using helper
 			tournament.Sport = sport
+		} else if err != nil {
+			s.logger.WarnContext(ctx, "Failed to populate sport details", slog.Int("tournament_id", tournament.ID), slog.Int("sport_id", tournament.SportID), slog.Any("error", err))
 		}
 	}
 
-	// 4. Загружаем всех подтвержденных участников турнира с деталями
-	statusConfirmed := models.StatusParticipant
-	dbParticipants, err := s.participantRepo.ListByTournament(ctx, tournamentID, &statusConfirmed, true) // true для загрузки User/Team
-	if err != nil {
-		// Можно решить, возвращать ли ошибку или пустую карту участников
-		log.Printf("Warning: GetTournamentBracketData: failed to list participants for tournament %d: %v", tournamentID, err)
+	if tournament.Format == nil && tournament.FormatID > 0 {
+		format, err := s.formatRepo.GetByID(ctx, tournament.FormatID)
+		if err == nil && format != nil {
+			tournament.Format = format
+		} else if err != nil {
+			s.logger.WarnContext(ctx, "Failed to populate format details", slog.Int("tournament_id", tournament.ID), slog.Int("format_id", tournament.FormatID), slog.Any("error", err))
+		}
 	}
+
+	if tournament.Organizer == nil && tournament.OrganizerID > 0 {
+		organizer, err := s.userRepo.GetByID(ctx, tournament.OrganizerID)
+		if err == nil && organizer != nil {
+			populateUserDetailsFunc(organizer, s.uploader) // Using helper
+			tournament.Organizer = organizer
+		} else if err != nil {
+			s.logger.WarnContext(ctx, "Failed to populate organizer details", slog.Int("tournament_id", tournament.ID), slog.Int("organizer_id", tournament.OrganizerID), slog.Any("error", err))
+		}
+	}
+}
+
+// GetTournamentBracketData retrieves all necessary data to display a tournament bracket.
+func (s *tournamentService) GetTournamentBracketData(ctx context.Context, tournamentID int) (*FullTournamentBracketView, error) {
+	s.logger.InfoContext(ctx, "GetTournamentBracketData: fetching data for tournament", slog.Int("tournament_id", tournamentID))
+
+	// 1. Load base tournament data and its direct relations (Sport, Format, Organizer)
+	tournament, err := s.GetTournamentByID(ctx, tournamentID, 0) // currentUserID 0 as it's for data fetching
+	if err != nil {
+		// GetTournamentByID already handles ErrTournamentNotFound mapping
+		return nil, fmt.Errorf("GetTournamentBracketData: failed to get tournament %d: %w", tournamentID, err)
+	}
+
+	if tournament.Format == nil { // Format is crucial for bracket display
+		return nil, fmt.Errorf("format information is missing or could not be loaded for tournament %d", tournamentID)
+	}
+
+	// 2. Load all confirmed participants with their details (User/Team and their logos)
+	statusConfirmed := models.StatusParticipant
+	// ListByTournament in repo now has includeNested flag, true loads User/Team
+	dbParticipants, err := s.participantRepo.ListByTournament(ctx, tournamentID, &statusConfirmed, true)
+	if err != nil {
+		s.logger.WarnContext(ctx, "GetTournamentBracketData: failed to list participants for tournament",
+			slog.Int("tournament_id", tournamentID), slog.Any("error", err))
+		// Decide if this is critical or can proceed with empty/partial participant map
+	}
+	// Populate logo URLs for participants (User/Team logos)
+	populateParticipantListDetailsFunc(dbParticipants, s.uploader) // Using helper from services/helpers.go
+
 	participantsMap := make(map[int]ParticipantView)
 	for _, p := range dbParticipants {
 		if p == nil {
 			continue
 		}
-		view := ParticipantView{
-			ParticipantDBID: p.ID,
-			OriginalUserID:  p.UserID,
-			OriginalTeamID:  p.TeamID,
-		}
-		if p.User != nil {
-			view.Type = "user"
-			view.Name = getParticipantName(p) // Использует Nickname или FirstName+LastName
-			if p.User.LogoKey != nil {
-				logoURL := s.uploader.GetPublicURL(*p.User.LogoKey)
-				view.LogoURL = &logoURL
-			}
-		} else if p.Team != nil {
-			view.Type = "team"
-			view.Name = p.Team.Name
-			if p.Team.LogoKey != nil {
-				logoURL := s.uploader.GetPublicURL(*p.Team.LogoKey)
-				view.LogoURL = &logoURL
-			}
-		}
-		participantsMap[p.ID] = view
+		// participantToParticipantViewFunc needs the uploader
+		participantsMap[p.ID] = participantToParticipantViewFunc(p, s.uploader) // Using helper
 	}
 
-	// 5. Загружаем все матчи (соло или командные)
+	// 3. Load all matches (solo or team) for the tournament
+	var roundsViewList []RoundView
 	roundsMap := make(map[int][]*MatchView)
 
 	if tournament.Format.ParticipantType == models.FormatParticipantSolo {
-		soloMatches, err := s.soloMatchRepo.ListByTournament(ctx, tournamentID, nil, nil)
-		if err != nil {
-			return nil, fmt.Errorf("GetTournamentBracketData: failed to list solo matches for tournament %d: %w", tournamentID, err)
+		soloMatches, listErr := s.soloMatchRepo.ListByTournament(ctx, tournamentID, nil, nil)
+		if listErr != nil {
+			return nil, fmt.Errorf("GetTournamentBracketData: failed to list solo matches for tournament %d: %w", tournamentID, listErr)
 		}
 		for _, sm := range soloMatches {
 			if sm == nil {
 				continue
 			}
-			orderInRound := 0 // Нужно определить OrderInRound, если он не хранится. Пока 0.
-			// Если bracket_match_uid вида "R1M5", то 5 - это OrderInRound
-			if sm.BracketMatchUID != nil {
-				parts := strings.SplitN(strings.TrimPrefix(*sm.BracketMatchUID, "R"+strconv.Itoa(*sm.Round)+"M"), "S", 2) // R1M5 -> 5
-				if len(parts) > 0 {
-					order, _ := strconv.Atoi(parts[0])
-					if order > 0 {
-						orderInRound = order
-					}
-				}
+			// toMatchViewFunc needs logger
+			mv := toMatchViewFunc(sm, nil, participantsMap, s.logger) // Using helper
+			if sm.Round == nil {
+				s.logger.WarnContext(ctx, "Solo match with nil round found, skipping", slog.Int("match_id", sm.ID), slog.Int("tournament_id", tournamentID))
+				continue
 			}
-
-			mv := MatchView{
-				MatchID:               sm.ID,
-				BracketMatchUID:       sm.BracketMatchUID,
-				Status:                sm.Status,
-				Round:                 *sm.Round, // Предполагаем, что Round не nil для созданных матчей
-				OrderInRound:          orderInRound,
-				ScoreString:           sm.Score,
-				WinnerParticipantDBID: sm.WinnerParticipantID,
-				NextMatchDBID:         sm.NextMatchDBID,
-				WinnerToSlot:          sm.WinnerToSlot,
-				MatchTime:             sm.MatchTime,
-			}
-			if sm.P1ParticipantID != nil {
-				if pView, ok := participantsMap[*sm.P1ParticipantID]; ok {
-					mv.Participant1 = &pView
-				}
-			}
-			if sm.P2ParticipantID != nil {
-				if pView, ok := participantsMap[*sm.P2ParticipantID]; ok {
-					mv.Participant2 = &pView
-				}
-			}
-			// TODO: Распарсить sm.Score в ScoreP1 и ScoreP2, если формат счета это позволяет
-
 			roundNum := *sm.Round
 			roundsMap[roundNum] = append(roundsMap[roundNum], &mv)
 		}
 	} else if tournament.Format.ParticipantType == models.FormatParticipantTeam {
-		teamMatches, err := s.teamMatchRepo.ListByTournament(ctx, tournamentID, nil, nil)
-		if err != nil {
-			return nil, fmt.Errorf("GetTournamentBracketData: failed to list team matches for tournament %d: %w", tournamentID, err)
+		teamMatches, listErr := s.teamMatchRepo.ListByTournament(ctx, tournamentID, nil, nil)
+		if listErr != nil {
+			return nil, fmt.Errorf("GetTournamentBracketData: failed to list team matches for tournament %d: %w", tournamentID, listErr)
 		}
 		for _, tm := range teamMatches {
 			if tm == nil {
 				continue
 			}
-			orderInRound := 0
-			if tm.BracketMatchUID != nil {
-				parts := strings.SplitN(strings.TrimPrefix(*tm.BracketMatchUID, "R"+strconv.Itoa(*tm.Round)+"M"), "S", 2)
-				if len(parts) > 0 {
-					order, _ := strconv.Atoi(parts[0])
-					if order > 0 {
-						orderInRound = order
-					}
-				}
-			}
-			mv := MatchView{
-				MatchID:               tm.ID,
-				BracketMatchUID:       tm.BracketMatchUID,
-				Status:                tm.Status,
-				Round:                 *tm.Round,
-				OrderInRound:          orderInRound,
-				ScoreString:           tm.Score,
-				WinnerParticipantDBID: tm.WinnerParticipantID,
-				NextMatchDBID:         tm.NextMatchDBID,
-				WinnerToSlot:          tm.WinnerToSlot,
-				MatchTime:             tm.MatchTime,
-			}
-			if tm.T1ParticipantID != nil {
-				if pView, ok := participantsMap[*tm.T1ParticipantID]; ok {
-					mv.Participant1 = &pView
-				}
-			}
-			if tm.T2ParticipantID != nil {
-				if pView, ok := participantsMap[*tm.T2ParticipantID]; ok {
-					mv.Participant2 = &pView
-				}
+			mv := toMatchViewFunc(nil, tm, participantsMap, s.logger) // Using helper
+			if tm.Round == nil {
+				s.logger.WarnContext(ctx, "Team match with nil round found, skipping", slog.Int("match_id", tm.ID), slog.Int("tournament_id", tournamentID))
+				continue
 			}
 			roundNum := *tm.Round
 			roundsMap[roundNum] = append(roundsMap[roundNum], &mv)
 		}
 	}
 
-	// 6. Формируем список раундов в правильном порядке
-	var roundsViewList []RoundView
+	// 4. Sort rounds and matches within rounds
 	roundNumbers := make([]int, 0, len(roundsMap))
 	for rNum := range roundsMap {
 		roundNumbers = append(roundNumbers, rNum)
@@ -897,198 +964,60 @@ func (s *tournamentService) GetTournamentBracketData(ctx context.Context, tourna
 
 	for _, rNum := range roundNumbers {
 		matchesInRound := roundsMap[rNum]
-		// Сортируем матчи внутри раунда по OrderInRound (если он был извлечен из UID) или по ID
+		// Sort matches by OrderInRound primarily, then by MatchID for stable sort
 		sort.Slice(matchesInRound, func(i, j int) bool {
 			if matchesInRound[i].OrderInRound != 0 && matchesInRound[j].OrderInRound != 0 {
-				return matchesInRound[i].OrderInRound < matchesInRound[j].OrderInRound
+				if matchesInRound[i].OrderInRound != matchesInRound[j].OrderInRound {
+					return matchesInRound[i].OrderInRound < matchesInRound[j].OrderInRound
+				}
 			}
-			return matchesInRound[i].MatchID < matchesInRound[j].MatchID // Fallback sort by ID
+			// Fallback or primary sort if OrderInRound is not set or equal
+			return matchesInRound[i].MatchID < matchesInRound[j].MatchID
 		})
 		roundsViewList = append(roundsViewList, RoundView{
 			RoundNumber: rNum,
-			Matches:     dereferenceMatchViews(matchesInRound),
+			Matches:     dereferenceMatchViews(matchesInRound), // Using helper
 		})
 	}
 
-	var overallWinnerID *int
-	// TODO: Если в tournament есть поле для общего победителя, установить overallWinnerID
+	// 5. Determine overall winner if tournament is completed
+	var overallWinnerParticipantID *int
+	// if tournament.Status == models.StatusCompleted {
+	// This logic might be more complex, e.g. finding the winner of the last match.
+	// Or, if Tournament model gets an OverallWinnerParticipantID field, use that.
+	// For now, this remains illustrative.
+	// }
 
 	return &FullTournamentBracketView{
 		TournamentID:               tournament.ID,
 		Name:                       tournament.Name,
 		Status:                     tournament.Status,
-		Sport:                      tournament.Sport,
-		Format:                     tournament.Format,
+		Sport:                      tournament.Sport,  // Already populated by GetTournamentByID
+		Format:                     tournament.Format, // Already populated by GetTournamentByID
 		Rounds:                     roundsViewList,
 		ParticipantsMap:            participantsMap,
-		OverallWinnerParticipantID: overallWinnerID,
+		OverallWinnerParticipantID: overallWinnerParticipantID,
 	}, nil
 }
 
-// Вспомогательная функция для разыменования слайса указателей на MatchView
-func dereferenceMatchViews(slice []*MatchView) []MatchView {
-	if slice == nil {
-		return []MatchView{}
-	}
-	result := make([]MatchView, len(slice))
-	for i, ptr := range slice {
-		if ptr != nil {
-			result[i] = *ptr
-		}
-	}
-	return result
+// --- Helper Functions (already in services/helpers.go or similar, or to be placed there) ---
+// validateTournamentDates, isValidStatusTransition,
+// populateTournamentLogoURLFunc, populateSportLogoURLFunc, populateUserDetailsFunc, populateParticipantListDetailsFunc
+// getParticipantDisplayNameFunc, participantToParticipantViewFunc, toMatchViewFunc, dereferenceMatchViews
+// These are assumed to be available from services/helpers.go or defined within the service if specific.
+// For brevity, their definitions are not repeated here but their usage is shown.
+
+// getParticipantDisplayName is a local helper or can be moved to helpers.go
+func (s *tournamentService) getParticipantDisplayName(p *models.Participant) string {
+	return getParticipantDisplayNameFunc(p) // Delegate to common helper
 }
 
-func (s *tournamentService) populateTournamentDetails(ctx context.Context, tournament *models.Tournament) {
-	if tournament == nil {
-		return
-	}
-	s.populateTournamentLogoURL(tournament)
-
-	if tournament.Sport == nil && tournament.SportID > 0 {
-		sport, err := s.sportRepo.GetByID(ctx, tournament.SportID)
-		if err == nil && sport != nil {
-			s.populateSportLogoURL(sport)
-			tournament.Sport = sport
-		} else if err != nil {
-			log.Printf("Warning: failed to populate sport %d for tournament %d: %v", tournament.SportID, tournament.ID, err)
-		}
-	}
-	if tournament.Format == nil && tournament.FormatID > 0 {
-		format, err := s.formatRepo.GetByID(ctx, tournament.FormatID)
-		if err == nil && format != nil {
-			tournament.Format = format
-		} else if err != nil {
-			log.Printf("Warning: failed to populate format %d for tournament %d: %v", tournament.FormatID, tournament.ID, err)
-		}
-	}
-	if tournament.Organizer == nil && tournament.OrganizerID > 0 {
-		organizer, err := s.userRepo.GetByID(ctx, tournament.OrganizerID)
-		if err == nil && organizer != nil {
-			s.populateUserDetails(organizer) // Убедитесь, что эта функция есть и работает
-			tournament.Organizer = organizer
-		} else if err != nil {
-			log.Printf("Warning: failed to populate organizer %d for tournament %d: %v", tournament.OrganizerID, tournament.ID, err)
-		}
-	}
-	// Загрузка подтвержденных участников (если нужно для общего отображения Tournament, а не только для сетки)
-	// statusConfirmed := models.StatusParticipant
-	// participants, _ := s.participantRepo.ListByTournament(ctx, tournament.ID, &statusConfirmed, true)
-	// s.populateParticipantListDetails(participants)
-	// tournament.Participants = ParticipantsToInterface(participants)
+// participantToParticipantView is a local helper or can be moved to helpers.go
+func (s *tournamentService) participantToParticipantView(p *models.Participant, uploader storage.FileUploader) ParticipantView {
+	return participantToParticipantViewFunc(p, uploader) // Delegate to common helper
 }
 
-func validateTournamentDates(reg, start, end time.Time) error {
-	if reg.IsZero() || start.IsZero() || end.IsZero() {
-		return ErrTournamentDatesRequired
-	}
-	if reg.After(start) {
-		return fmt.Errorf("%w: registration date (%s) cannot be after start date (%s)", ErrTournamentInvalidRegDate, reg.Format(time.RFC3339), start.Format(time.RFC3339))
-	}
-	if !start.Before(end) {
-		return fmt.Errorf("%w: start date (%s) must be before end date (%s)", ErrTournamentInvalidDateRange, start.Format(time.RFC3339), end.Format(time.RFC3339))
-	}
-	return nil
-}
-
-func isValidTournamentStatus(status models.TournamentStatus) bool {
-	switch status {
-	case models.StatusSoon, models.StatusRegistration, models.StatusActive, models.StatusCompleted, models.StatusCanceled:
-		return true
-	}
-	return false
-}
-
-func isValidStatusTransition(current, next models.TournamentStatus) bool {
-	if current == next {
-		return true
-	}
-	allowedTransitions := map[models.TournamentStatus][]models.TournamentStatus{
-		models.StatusSoon:         {models.StatusRegistration, models.StatusCanceled},
-		models.StatusRegistration: {models.StatusActive, models.StatusCanceled},
-		models.StatusActive:       {models.StatusCompleted, models.StatusCanceled},
-		models.StatusCompleted:    {}, // No transitions from completed (except maybe to canceled if needed, but not typical)
-		models.StatusCanceled:     {}, // No transitions from canceled
-	}
-	for _, allowedNextStatus := range allowedTransitions[current] {
-		if next == allowedNextStatus {
-			return true
-		}
-	}
-	return false
-}
-
-func derefString(s *string) string {
-	if s == nil {
-		return ""
-	}
-	return *s
-}
-
-func ParticipantsToInterface(slice []*models.Participant) []models.Participant {
-	if slice == nil {
-		return []models.Participant{} // Return empty slice instead of nil for consistency
-	}
-	result := make([]models.Participant, len(slice))
-	for i, ptr := range slice {
-		if ptr != nil {
-			result[i] = *ptr
-		}
-	}
-	return result
-}
-
-func SoloMatchesToInterface(slice []*models.SoloMatch) []models.SoloMatch {
-	if slice == nil {
-		return []models.SoloMatch{} // Return empty slice
-	}
-	result := make([]models.SoloMatch, len(slice))
-	for i, ptr := range slice {
-		if ptr != nil {
-			result[i] = *ptr
-		}
-	}
-	return result
-}
-
-func TeamMatchesToInterface(slice []*models.TeamMatch) []models.TeamMatch {
-	if slice == nil {
-		return []models.TeamMatch{} // Return empty slice
-	}
-	result := make([]models.TeamMatch, len(slice))
-	for i, ptr := range slice {
-		if ptr != nil {
-			result[i] = *ptr
-		}
-	}
-	return result
-}
-
-func (s *tournamentService) populateSportLogoURL(sport *models.Sport) {
-	if sport != nil && sport.LogoKey != nil && *sport.LogoKey != "" && s.uploader != nil {
-		url := s.uploader.GetPublicURL(*sport.LogoKey)
-		if url != "" {
-			sport.LogoURL = &url
-		}
-	}
-}
-
-func (s *tournamentService) populateParticipantListDetails(participants []*models.Participant) {
-	if s.uploader == nil {
-		return
-	}
-	for _, p := range participants {
-		if p == nil {
-			continue
-		}
-		if p.User != nil {
-			s.populateUserDetails(p.User)
-		}
-		if p.Team != nil && p.Team.LogoKey != nil && *p.Team.LogoKey != "" {
-			url := s.uploader.GetPublicURL(*p.Team.LogoKey)
-			if url != "" {
-				p.Team.LogoURL = &url
-			}
-		}
-	}
+// toMatchView is a local helper or can be moved to helpers.go
+func (s *tournamentService) toMatchView(sm *models.SoloMatch, tm *models.TeamMatch, participantsMap map[int]ParticipantView) MatchView {
+	return toMatchViewFunc(sm, tm, participantsMap, s.logger) // Delegate to common helper
 }

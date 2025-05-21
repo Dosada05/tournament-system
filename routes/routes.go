@@ -136,7 +136,7 @@ func SetupRoutes(
 			authRouter.Patch("/{tournamentID}/matches/team/{matchID}/result", tournamentHandler.UpdateTeamMatchResultHandler)
 		})
 	})
-
+	
 	// --- Маршруты Participants (управление заявками) ---
 	router.Route("/participants/{participantID}", func(r chi.Router) {
 		r.Use(middleware.Authenticate)

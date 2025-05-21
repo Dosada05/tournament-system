@@ -2,7 +2,7 @@ package services
 
 import (
 	"context"
-	"database/sql"
+	// "database/sql" // Больше не нужен здесь, если только для GetFullTournamentData, но там тоже можно убрать, если репо не требуют
 	"fmt"
 	"log"
 	"time"
@@ -13,7 +13,8 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-var ErrTournamentRequiresTransaction = fmt.Errorf("database transaction is required for this operation")
+// ErrTournamentRequiresTransaction был определен ранее, можно оставить или удалить, если не используется вне этого контекста
+// var ErrTournamentRequiresTransaction = fmt.Errorf("database transaction is required for this operation")
 
 type TournamentWinnerPayload struct {
 	TournamentID   int                 `json:"tournament_id"`
@@ -24,12 +25,12 @@ type TournamentWinnerPayload struct {
 }
 
 type BracketService interface {
-	GenerateAndSaveBracket(ctx context.Context, tournament *models.Tournament) (interface{}, error)
+	// GenerateAndSaveBracket теперь принимает SQLExecutor
+	GenerateAndSaveBracket(ctx context.Context, exec repositories.SQLExecutor, tournament *models.Tournament) (interface{}, error)
 	GetFullTournamentData(ctx context.Context, tournamentID int, formatID int) (*models.Tournament, error)
 }
 
 type bracketService struct {
-	db              *sql.DB
 	formatRepo      repositories.FormatRepository
 	participantRepo repositories.ParticipantRepository
 	soloMatchRepo   repositories.SoloMatchRepository
@@ -37,14 +38,12 @@ type bracketService struct {
 }
 
 func NewBracketService(
-	db *sql.DB,
 	formatRepo repositories.FormatRepository,
 	participantRepo repositories.ParticipantRepository,
 	soloMatchRepo repositories.SoloMatchRepository,
 	teamMatchRepo repositories.TeamMatchRepository,
 ) BracketService {
 	return &bracketService{
-		db:              db,
 		formatRepo:      formatRepo,
 		participantRepo: participantRepo,
 		soloMatchRepo:   soloMatchRepo,
@@ -52,32 +51,36 @@ func NewBracketService(
 	}
 }
 
-func (s *bracketService) GenerateAndSaveBracket(ctx context.Context, tournament *models.Tournament) (interface{}, error) {
+// GenerateAndSaveBracket теперь принимает SQLExecutor (которым будет *sql.Tx из TournamentService)
+func (s *bracketService) GenerateAndSaveBracket(ctx context.Context, exec repositories.SQLExecutor, tournament *models.Tournament) (interface{}, error) {
+	// Важно: Этот метод теперь НЕ должен начинать или коммитить/откатывать транзакцию.
+	// Это делает вызывающая сторона (TournamentService.AutoUpdateTournamentStatusesByDates).
+	// Все операции записи в БД внутри этого метода должны использовать переданный 'exec'.
+
 	if tournament.Format == nil {
+		// Чтение формата: если formatRepo.GetByID не принимает SQLExecutor, он будет использовать свое соединение.
+		// Это нормально, так как формат читается до каких-либо записей в текущей транзакции 'exec'.
 		format, err := s.formatRepo.GetByID(ctx, tournament.FormatID)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load format %d for bracket generation: %w", tournament.FormatID, err)
+			return nil, fmt.Errorf("GenerateAndSaveBracket: failed to load format %d: %w", tournament.FormatID, err)
 		}
 		if format == nil {
-			return nil, fmt.Errorf("format %d not found, though no error was returned", tournament.FormatID)
+			return nil, fmt.Errorf("GenerateAndSaveBracket: format %d not found", tournament.FormatID)
 		}
 		tournament.Format = format
 	}
 
-	log.Printf("Starting bracket generation for tournament ID: %d, Format: %s, ParticipantType: %s, BracketType: %s",
-		tournament.ID, tournament.Format.Name, tournament.Format.ParticipantType, tournament.Format.BracketType)
+	log.Printf("GenerateAndSaveBracket: Starting for tournament ID: %d within a transaction", tournament.ID)
 
 	statusConfirmed := models.StatusParticipant
+	// Чтение участников: аналогично формату, participantRepo.ListByTournament использует свое соединение.
 	dbParticipants, err := s.participantRepo.ListByTournament(ctx, tournament.ID, &statusConfirmed, true)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list confirmed participants for tournament %d: %w", tournament.ID, err)
+		return nil, fmt.Errorf("GenerateAndSaveBracket: failed to list participants for tournament %d: %w", tournament.ID, err)
 	}
 
-	if len(dbParticipants) == 0 {
-		return nil, fmt.Errorf("no confirmed participants to generate bracket for tournament %d", tournament.ID)
-	}
-	if len(dbParticipants) < 2 {
-		return nil, fmt.Errorf("not enough participants to generate bracket (minimum 2 required, found %d)", len(dbParticipants))
+	if len(dbParticipants) < 2 { // Эта проверка уже есть в TournamentService, но здесь как дополнительная защита
+		return nil, fmt.Errorf("GenerateAndSaveBracket: not enough participants (found %d, min 2)", len(dbParticipants))
 	}
 
 	var bracketGenerator brackets.BracketGenerator
@@ -94,56 +97,27 @@ func (s *bracketService) GenerateAndSaveBracket(ctx context.Context, tournament 
 	}
 	generatedBracketMatches, genErr := bracketGenerator.GenerateBracket(ctx, params)
 	if genErr != nil {
-		return nil, fmt.Errorf("failed to generate bracket structure for tournament %d: %w", tournament.ID, genErr)
+		return nil, fmt.Errorf("GenerateAndSaveBracket: failed to generate structure: %w", genErr)
 	}
-	if len(generatedBracketMatches) == 0 && len(dbParticipants) >= 2 { // Уточнено условие
-		return nil, fmt.Errorf("bracket generation resulted in no matches for %d participants", len(dbParticipants))
+	if len(generatedBracketMatches) == 0 && len(dbParticipants) >= 2 {
+		return nil, fmt.Errorf("GenerateAndSaveBracket: no matches generated for %d participants", len(dbParticipants))
 	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to begin transaction: %w", err)
-	}
-	var txErr error
-	defer func() {
-		if p := recover(); p != nil {
-			_ = tx.Rollback()
-			panic(p)
-		} else if txErr != nil {
-			log.Printf("Rolling back transaction due to error: %v", txErr)
-			if rbErr := tx.Rollback(); rbErr != nil {
-				log.Printf("Error during rollback: %v. Original error: %v", rbErr, txErr)
-				txErr = fmt.Errorf("transaction processing error: %w (rollback also failed: %v)", txErr, rbErr)
-			}
-		} else {
-			if cErr := tx.Commit(); cErr != nil {
-				log.Printf("Failed to commit transaction for tournament %d: %v", tournament.ID, cErr)
-				txErr = fmt.Errorf("failed to commit transaction: %w", cErr)
-			} else {
-				log.Printf("Transaction committed for tournament %d bracket.", tournament.ID)
-			}
-		}
-	}()
 
 	mapBracketUIDToDBMatchID := make(map[string]int)
-	mapBracketUIDToModel := make(map[string]*brackets.BracketMatch) // Для второго прохода
+	mapBracketUIDToModel := make(map[string]*brackets.BracketMatch)
 	createdDBMatchEntities := make([]interface{}, 0, len(generatedBracketMatches))
-
 	defaultMatchTime := tournament.StartDate
 	if time.Now().After(defaultMatchTime) {
-		defaultMatchTime = time.Now().Add(15 * time.Minute)
+		defaultMatchTime = time.Now().Add(15 * time.Minute) // Можно вынести в константу или конфигурацию
 	}
 
-	// ПЕРВЫЙ ПРОХОД: Создаем все матчи-заготовки в БД
+	// ПЕРВЫЙ ПРОХОД: Создаем все матчи-заготовки в БД, используя переданный 'exec'
 	for _, bm := range generatedBracketMatches {
-		mapBracketUIDToModel[bm.UID] = bm // Сохраняем для второго прохода
+		mapBracketUIDToModel[bm.UID] = bm
 
 		if bm.IsBye {
-			// Участник bm.ByeParticipantID (который также должен быть в bm.Participant1ID)
-			// просто проходит дальше. Запись в БД для этого "bye-матча" не создается.
-			// Его продвижение учтено генератором при формировании узлов для следующего раунда.
 			if bm.ByeParticipantID != nil {
-				log.Printf("Participant ID %d (UID: %s) has a bye in Round %d. No DB match created for this bye event.", *bm.ByeParticipantID, bm.UID, bm.Round)
+				log.Printf("GenerateAndSaveBracket: Participant ID %d (UID: %s) has a bye in Round %d. No DB match created for this bye event.", *bm.ByeParticipantID, bm.UID, bm.Round)
 			}
 			continue
 		}
@@ -153,10 +127,6 @@ func (s *bracketService) GenerateAndSaveBracket(ctx context.Context, tournament 
 		var currentDBMatchEntity interface{}
 		bmUIDStr := bm.UID
 
-		// Участники bm.Participant1ID и bm.Participant2ID уже должны быть корректно
-		// установлены генератором, если они известны (включая тех, кто прошел по bye
-		// в предыдущем "слое" обработки узлов генератором).
-		// Если они nil, значит, это плейсхолдеры для победителей предыдущих матчей.
 		switch tournament.Format.ParticipantType {
 		case models.FormatParticipantSolo:
 			newMatch := &models.SoloMatch{
@@ -168,43 +138,39 @@ func (s *bracketService) GenerateAndSaveBracket(ctx context.Context, tournament 
 				Round:           &roundNum,
 				BracketMatchUID: &bmUIDStr,
 			}
-			txErr = s.soloMatchRepo.Create(ctx, tx, newMatch)
-			if txErr != nil {
-				return nil, txErr
+			err = s.soloMatchRepo.Create(ctx, exec, newMatch) // Используем exec
+			if err != nil {
+				return nil, fmt.Errorf("GenerateAndSaveBracket: failed to save solo match (BracketUID: %s): %w", bm.UID, err)
 			}
 			currentDBMatchID = newMatch.ID
 			currentDBMatchEntity = newMatch
 		case models.FormatParticipantTeam:
 			newMatch := &models.TeamMatch{
 				TournamentID:    tournament.ID,
-				T1ParticipantID: bm.Participant1ID, // Используем Participant1ID/2ID для обоих типов
+				T1ParticipantID: bm.Participant1ID,
 				T2ParticipantID: bm.Participant2ID,
 				MatchTime:       defaultMatchTime,
 				Status:          models.StatusScheduled,
 				Round:           &roundNum,
 				BracketMatchUID: &bmUIDStr,
 			}
-			txErr = s.teamMatchRepo.Create(ctx, tx, newMatch)
-			if txErr != nil {
-				return nil, txErr
+			err = s.teamMatchRepo.Create(ctx, exec, newMatch) // Используем exec
+			if err != nil {
+				return nil, fmt.Errorf("GenerateAndSaveBracket: failed to save team match (BracketUID: %s): %w", bm.UID, err)
 			}
 			currentDBMatchID = newMatch.ID
 			currentDBMatchEntity = newMatch
 		default:
-			txErr = fmt.Errorf("unknown participant type '%s'", tournament.Format.ParticipantType)
-			return nil, txErr
+			return nil, fmt.Errorf("unknown participant type '%s' for tournament %d", tournament.Format.ParticipantType, tournament.ID)
 		}
 		mapBracketUIDToDBMatchID[bm.UID] = currentDBMatchID
 		createdDBMatchEntities = append(createdDBMatchEntities, currentDBMatchEntity)
-		log.Printf("DB Match ID %d (BracketUID: %s) created for Round %d", currentDBMatchID, bm.UID, roundNum)
-	}
-	if txErr != nil {
-		return nil, txErr
+		log.Printf("GenerateAndSaveBracket: DB Match ID %d (BracketUID: %s) created for Round %d using exec.", currentDBMatchID, bm.UID, roundNum)
 	}
 
-	// ВТОРОЙ ПРОХОД: Устанавливаем связи next_match_db_id и winner_to_slot
+	// ВТОРОЙ ПРОХОД: Устанавливаем связи next_match_db_id и winner_to_slot, используя 'exec'
 	for currentBracketUID, currentDBMatchID := range mapBracketUIDToDBMatchID {
-		bm := mapBracketUIDToModel[currentBracketUID] // Гарантированно существует, т.к. currentBracketUID из ключей карты
+		bm := mapBracketUIDToModel[currentBracketUID]
 
 		var nextMatchDBIDForUpdate *int
 		var targetSlotInNextMatchForUpdate *int
@@ -212,12 +178,11 @@ func (s *bracketService) GenerateAndSaveBracket(ctx context.Context, tournament 
 		for _, potentialTargetBm := range generatedBracketMatches {
 			if potentialTargetBm.IsBye {
 				continue
-			} // Следующий матч не может быть "bye-слотом"
-
+			}
 			targetDBID, isTargetMatchInDB := mapBracketUIDToDBMatchID[potentialTargetBm.UID]
 			if !isTargetMatchInDB {
 				continue
-			} // Если по какой-то причине целевой матч не был создан в БД
+			}
 
 			isSource := false
 			slot := 0
@@ -237,75 +202,33 @@ func (s *bracketService) GenerateAndSaveBracket(ctx context.Context, tournament 
 		}
 
 		if nextMatchDBIDForUpdate != nil {
-			log.Printf("Linking DB Match ID %d (BracketUID: %s) to Next DB Match ID %d, Slot %d",
+			log.Printf("GenerateAndSaveBracket: Linking DB Match ID %d (BracketUID: %s) to Next DB Match ID %d, Slot %d using exec.",
 				currentDBMatchID, bm.UID, *nextMatchDBIDForUpdate, *targetSlotInNextMatchForUpdate)
 			if tournament.Format.ParticipantType == models.FormatParticipantSolo {
-				txErr = s.soloMatchRepo.UpdateNextMatchInfo(ctx, tx, currentDBMatchID, nextMatchDBIDForUpdate, targetSlotInNextMatchForUpdate)
+				err = s.soloMatchRepo.UpdateNextMatchInfo(ctx, exec, currentDBMatchID, nextMatchDBIDForUpdate, targetSlotInNextMatchForUpdate)
 			} else {
-				txErr = s.teamMatchRepo.UpdateNextMatchInfo(ctx, tx, currentDBMatchID, nextMatchDBIDForUpdate, targetSlotInNextMatchForUpdate)
+				err = s.teamMatchRepo.UpdateNextMatchInfo(ctx, exec, currentDBMatchID, nextMatchDBIDForUpdate, targetSlotInNextMatchForUpdate)
 			}
-			if txErr != nil {
-				return nil, txErr
+			if err != nil {
+				return nil, fmt.Errorf("GenerateAndSaveBracket: failed to update next match info for DB match %d (BracketUID: %s): %w", currentDBMatchID, bm.UID, err)
 			}
 		}
 	}
-	if txErr != nil {
-		return nil, txErr
-	}
+	// Третий проход был удален, т.к. предполагается, что генератор корректно устанавливает участников с bye
+	// в поля Participant1ID/Participant2ID матчей следующего раунда, и первый проход BracketService их сохраняет.
 
-	// Третий проход больше не нужен, так как генератор должен корректно устанавливать
-	// участников, прошедших по bye, в поля Participant1ID/Participant2ID
-	// матчей следующего раунда, и первый проход BracketService их уже сохранит.
-
-	if txErr != nil { // Проверка после всех операций перед возвратом из defer
-		return nil, txErr
-	}
-
-	log.Printf("Bracket processing completed for tournament %d. Fetching full data.", tournament.ID)
-	fullBracketData, fetchErr := s.GetFullTournamentData(context.Background(), tournament.ID, tournament.FormatID)
-	if fetchErr != nil {
-		log.Printf("Bracket saved for tournament %d, but failed to fetch full data for response: %v. Returning created DB matches.", tournament.ID, fetchErr)
-		return createdDBMatchEntities, nil
-	}
-
-	return fullBracketData, nil
+	log.Printf("GenerateAndSaveBracket: Bracket processing completed for tournament %d using exec.", tournament.ID)
+	// Возвращаем созданные сущности. Вызывающая сторона (TournamentService) решит, что с ними делать.
+	// GetFullTournamentData здесь не вызывается, так как мы находимся внутри транзакции 'exec'.
+	return createdDBMatchEntities, nil
 }
 
-func getParticipantName(p *models.Participant) string {
-	if p == nil {
-		return "Unknown Participant"
-	}
-	if p.User != nil {
-		if p.User.Nickname != nil && *p.User.Nickname != "" {
-			return *p.User.Nickname
-		}
-		if p.User.FirstName != "" {
-			name := p.User.FirstName
-			if p.User.LastName != "" {
-				name += " " + p.User.LastName
-			}
-			return name
-		}
-	}
-	if p.Team != nil && p.Team.Name != "" {
-		return p.Team.Name
-	}
-	if p.ID != 0 { // Если есть хотя бы Participant.ID
-		return fmt.Sprintf("Participant (ID: %d)", p.ID)
-	}
-	return "Unnamed Participant"
-}
-
+// GetFullTournamentData остается без изменений, он не использует транзакции этого сервиса
+// и предназначен для чтения полного состояния сетки для отображения.
 func (s *bracketService) GetFullTournamentData(ctx context.Context, tournamentID int, formatID int) (*models.Tournament, error) {
-	// Инициализируем турнир только с ID и FormatID, остальное загрузим.
-	// Основные детали турнира (имя, описание и т.д.) должны быть загружены
-	// вызывающим TournamentService, если это необходимо для полного ответа.
-	// Этот метод фокусируется на данных, связанных с сеткой.
 	tournament := &models.Tournament{ID: tournamentID, FormatID: formatID}
-
 	g, gCtx := errgroup.WithContext(ctx)
 
-	// 1. Загрузка формата турнира
 	g.Go(func() error {
 		format, err := s.formatRepo.GetByID(gCtx, formatID)
 		if err != nil {
@@ -320,14 +243,11 @@ func (s *bracketService) GetFullTournamentData(ctx context.Context, tournamentID
 		return nil
 	})
 
-	// 2. Загрузка подтвержденных участников
 	g.Go(func() error {
 		confirmedStatus := models.StatusParticipant
-		// participantRepo.ListByTournament должен уметь загружать User/Team детали
 		participants, err := s.participantRepo.ListByTournament(gCtx, tournamentID, &confirmedStatus, true)
 		if err != nil {
 			log.Printf("Error fetching confirmed participants for tournament %d in GetFullTournamentData: %v", tournamentID, err)
-			// Не возвращаем ошибку, чтобы остальные данные могли загрузиться, если это не критично
 		}
 		if participants == nil {
 			tournament.Participants = []models.Participant{}
@@ -342,9 +262,7 @@ func (s *bracketService) GetFullTournamentData(ctx context.Context, tournamentID
 		return nil
 	})
 
-	// 3. Загрузка соло матчей
 	g.Go(func() error {
-		// soloMatchRepo.ListByTournament должен уметь загружать детали P1/P2, если это настроено
 		soloMatches, err := s.soloMatchRepo.ListByTournament(gCtx, tournamentID, nil, nil)
 		if err != nil {
 			log.Printf("Error fetching solo matches for tournament %d in GetFullTournamentData: %v", tournamentID, err)
@@ -362,7 +280,6 @@ func (s *bracketService) GetFullTournamentData(ctx context.Context, tournamentID
 		return nil
 	})
 
-	// 4. Загрузка командных матчей
 	g.Go(func() error {
 		teamMatches, err := s.teamMatchRepo.ListByTournament(gCtx, tournamentID, nil, nil)
 		if err != nil {
@@ -382,15 +299,10 @@ func (s *bracketService) GetFullTournamentData(ctx context.Context, tournamentID
 	})
 
 	if err := g.Wait(); err != nil {
-		// Если любая из горутин вернула ошибку, она будет здесь.
-		// Однако, если горутины только логируют ошибку и возвращают nil, то этой ошибки не будет.
 		log.Printf("Error during parallel fetching in GetFullTournamentData for tournament %d: %v", tournamentID, err)
-		// В зависимости от критичности, можно вернуть nil, err или частично заполненный tournament.
-		// Пока что, если была ошибка в одной из критичных загрузок (например, формат), вернем ошибку.
-		if tournament.Format == nil { // Если формат не загрузился, это проблема
+		if tournament.Format == nil {
 			return nil, fmt.Errorf("critical data (format) failed to load for tournament %d: %w", tournamentID, err)
 		}
-		// Иначе, возвращаем что есть, ошибки залогированы.
 	}
 	return tournament, nil
 }

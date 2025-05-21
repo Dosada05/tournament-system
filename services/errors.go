@@ -49,7 +49,3 @@ var (
 	ErrTournamentInvalidStatus           = errors.New("invalid tournament status provided")
 	ErrTournamentInvalidStatusTransition = errors.New("invalid tournament status transition")
 )
-
-// Примечание: Этот список можно расширять по мере необходимости.
-// Некоторые ошибки могут оставаться специфичными для конкретного сервиса,
-// если они не требуют специального маппинга в HTTP-слое или не используются в других сервисах.

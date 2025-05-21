@@ -208,7 +208,7 @@ func (h *TournamentHandler) UpdateStatusHandler(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	tournament, err := h.tournamentService.UpdateTournamentStatus(r.Context(), id, currentUserID, statusInput.Status)
+	tournament, err := h.tournamentService.UpdateTournamentStatus(r.Context(), id, currentUserID, statusInput.Status, nil)
 	if err != nil {
 		mapServiceErrorToHTTP(w, r, err)
 		return

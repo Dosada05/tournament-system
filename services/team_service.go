@@ -346,23 +346,3 @@ func (s *teamService) populateTeamLogoURL(team *models.Team) {
 		}
 	}
 }
-
-func GetExtensionFromContentType(contentType string) (string, error) {
-	switch contentType {
-	case "image/jpeg":
-		return ".jpg", nil
-	case "image/png":
-		return ".png", nil
-	case "image/gif":
-		return ".gif", nil
-	case "image/webp":
-		return ".webp", nil
-	default:
-		parts := strings.Split(contentType, "/")
-		if len(parts) == 2 && strings.HasPrefix(parts[0], "image") && parts[1] != "" {
-			ext := "." + strings.Split(parts[1], "+")[0]
-			return ext, nil
-		}
-		return "", fmt.Errorf("%w: unsupported content type '%s'", ErrCouldNotDetermineFileExtension, contentType)
-	}
-}
