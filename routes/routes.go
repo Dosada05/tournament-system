@@ -1,3 +1,4 @@
+// tournament-system/routes/routes.go
 package api
 
 import (
@@ -20,15 +21,16 @@ func SetupRoutes(
 	sportHandler *handlers.SportHandler,
 	inviteHandler *handlers.InviteHandler,
 	participantHandler *handlers.ParticipantHandler,
+	webSocketHandler *handlers.WebSocketHandler,
+	formatHandler *handlers.FormatHandler,
 ) {
-	// ... (middlewares, swagger, users, teams, sports, invites без изменений) ...
 	router.Use(chiMiddleware.Logger)
 	router.Use(chiMiddleware.Recoverer)
 	router.Use(chiMiddleware.RequestID)
 	router.Use(chiMiddleware.RealIP)
 
 	router.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
+		AllowedOrigins:   []string{"*"}, // Настрой для продакшена!
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
 		ExposedHeaders:   []string{"Link"},
@@ -38,10 +40,15 @@ func SetupRoutes(
 
 	router.Get("/swagger/*", httpSwagger.WrapHandler)
 
-	router.Route("/users", func(r chi.Router) {
+	// --- Маршруты Auth ---
+	router.Route("/auth", func(r chi.Router) { // Изменил с /users на /auth для ясности
 		r.Post("/signup", authHandler.Register)
 		r.Post("/signin", authHandler.Login)
-		r.Get("/{id}", userHandler.GetUserByID)
+	})
+
+	// --- Маршруты Users ---
+	router.Route("/users", func(r chi.Router) {
+		r.Get("/{id}", userHandler.GetUserByID) // Публичный профиль
 
 		r.Group(func(authRouter chi.Router) {
 			authRouter.Use(middleware.Authenticate)
@@ -50,6 +57,7 @@ func SetupRoutes(
 		})
 	})
 
+	// --- Маршруты Teams ---
 	router.Route("/teams", func(r chi.Router) {
 		r.Get("/{teamID}", teamHandler.GetTeamByID)
 		r.Get("/{teamID}/members", teamHandler.ListTeamMembers)
@@ -61,16 +69,26 @@ func SetupRoutes(
 			authRouter.Delete("/{teamID}", teamHandler.DeleteTeam)
 			authRouter.Delete("/{teamID}/members/{userID}", teamHandler.RemoveMember)
 			authRouter.Post("/{teamID}/logo", teamHandler.UploadTeamLogo)
+
+			// Маршруты для инвайтов в команду
+			authRouter.Route("/{teamID}/invites", func(inviteRouter chi.Router) {
+				inviteRouter.Post("/", inviteHandler.CreateOrRenewInviteHandler)
+				inviteRouter.Get("/", inviteHandler.GetTeamInviteHandler)
+				inviteRouter.Delete("/", inviteHandler.RevokeInviteHandler)
+			})
 		})
 	})
+	// Маршрут для присоединения к команде по токену (аутентифицированный пользователь)
+	router.With(middleware.Authenticate).Post("/invites/join/{token}", inviteHandler.JoinTeamHandler)
 
+	// --- Маршруты Sports ---
 	router.Route("/sports", func(r chi.Router) {
 		r.Get("/", sportHandler.GetAllSports)
 		r.Get("/{sportID}", sportHandler.GetSportByID)
 
 		r.Group(func(adminRouter chi.Router) {
 			adminRouter.Use(middleware.Authenticate)
-			adminRouter.Use(middleware.Authorize(models.RoleAdmin))
+			adminRouter.Use(middleware.Authorize(models.RoleAdmin)) // Только админ может управлять видами спорта
 			adminRouter.Post("/", sportHandler.CreateSport)
 			adminRouter.Put("/{sportID}", sportHandler.UpdateSport)
 			adminRouter.Delete("/{sportID}", sportHandler.DeleteSport)
@@ -78,47 +96,56 @@ func SetupRoutes(
 		})
 	})
 
-	router.Group(func(authRouter chi.Router) {
-		authRouter.Use(middleware.Authenticate)
-		authRouter.Post("/invites/{token}", inviteHandler.JoinTeamHandler)
+	router.Route("/formats", func(r chi.Router) {
+		// Публичные маршруты для форматов (если нужны)
+		r.Get("/", formatHandler.GetAllFormats)           // Список всех форматов
+		r.Get("/{formatID}", formatHandler.GetFormatByID) // Получение формата по ID
+
+		// Маршруты, требующие аутентификации и прав администратора
+		r.Group(func(adminRouter chi.Router) {
+			adminRouter.Use(middleware.Authenticate)
+			adminRouter.Use(middleware.Authorize(models.RoleAdmin))
+			adminRouter.Post("/", formatHandler.CreateFormat)
+			adminRouter.Put("/{formatID}", formatHandler.UpdateFormat)
+			adminRouter.Delete("/{formatID}", formatHandler.DeleteFormat)
+		})
 	})
 
-	router.Route("/teams/{teamID}/invites", func(r chi.Router) {
-		r.Use(middleware.Authenticate)
-		r.Post("/", inviteHandler.CreateOrRenewInviteHandler)
-		r.Get("/", inviteHandler.GetTeamInviteHandler)
-		r.Delete("/", inviteHandler.RevokeInviteHandler)
-	})
-
+	// --- Маршруты Tournaments ---
 	router.Route("/tournaments", func(r chi.Router) {
 		r.Get("/", tournamentHandler.ListHandler)
-		r.Get("/{tournamentID}", tournamentHandler.GetByIDHandler) // Публичный доступ к деталям
-
-		// Публичный доступ к матчам турнира
+		r.Get("/{tournamentID}", tournamentHandler.GetByIDHandler)
 		r.Get("/{tournamentID}/matches/solo", tournamentHandler.ListTournamentSoloMatchesHandler)
 		r.Get("/{tournamentID}/matches/team", tournamentHandler.ListTournamentTeamMatchesHandler)
-
-		// Публичный доступ к участникам (сервис сам решает, что показывать)
 		r.Get("/{tournamentID}/participants", participantHandler.ListApplications)
+
+		r.Get("/{tournamentID}/bracket", tournamentHandler.GetTournamentBracketHandler)
 
 		r.Group(func(authRouter chi.Router) {
 			authRouter.Use(middleware.Authenticate)
-			// Создание и управление турниром (для организаторов)
 			authRouter.Post("/", tournamentHandler.CreateHandler)
 			authRouter.Put("/{tournamentID}", tournamentHandler.UpdateDetailsHandler)
 			authRouter.Patch("/{tournamentID}/status", tournamentHandler.UpdateStatusHandler)
 			authRouter.Delete("/{tournamentID}", tournamentHandler.DeleteHandler)
 			authRouter.Post("/{tournamentID}/logo", tournamentHandler.UploadTournamentLogoHandler)
 
-			// Регистрация на турнир (для аутентифицированных пользователей)
 			authRouter.Post("/{tournamentID}/register/solo", participantHandler.RegisterSolo)
 			authRouter.Post("/{tournamentID}/register/team", participantHandler.RegisterTeam)
+
+			authRouter.Patch("/{tournamentID}/matches/solo/{matchID}/result", tournamentHandler.UpdateSoloMatchResultHandler)
+			authRouter.Patch("/{tournamentID}/matches/team/{matchID}/result", tournamentHandler.UpdateTeamMatchResultHandler)
 		})
 	})
 
+	// --- Маршруты Participants (управление заявками) ---
 	router.Route("/participants/{participantID}", func(r chi.Router) {
 		r.Use(middleware.Authenticate)
+		// Отмена своей регистрации (пользователь/капитан)
 		r.Delete("/cancel", participantHandler.CancelRegistration)
+		// Управление заявками (для организатора турнира - можно добавить Authorize)
 		r.Patch("/status", participantHandler.UpdateApplicationStatus)
 	})
+
+	router.Get("/ws/tournaments/{tournamentID}", webSocketHandler.ServeWs)
+
 }

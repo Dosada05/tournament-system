@@ -62,7 +62,7 @@ func (r *postgresParticipantRepository) Create(ctx context.Context, p *models.Pa
 				}
 			case "23503": // foreign_key_violation
 				switch pqErr.Constraint {
-				case "participants_user_id_fkey": // Убедись, что имена constraint'ов совпадают с твоей схемой
+				case "participants_user_id_fkey":
 					return ErrParticipantUserInvalid
 				case "participants_team_id_fkey":
 					return ErrParticipantTeamInvalid

@@ -8,7 +8,7 @@ import (
 	_ "time"
 
 	"github.com/Dosada05/tournament-system/models"
-	"github.com/lib/pq" // Для обработки ошибок PostgreSQL
+	"github.com/lib/pq"
 )
 
 var (
@@ -143,16 +143,7 @@ func (r *postgresInviteRepository) Update(ctx context.Context, invite *models.In
 		return fmt.Errorf("failed to update invite: %w", err)
 	}
 
-	rowsAffected, checkErr := checkRowsAffected(result)
-	if checkErr != nil {
-		return fmt.Errorf("failed to check affected rows on invite update: %w", checkErr)
-	}
-	if rowsAffected == 0 {
-		// Либо инвайт не найден по ID, либо team_id не совпал
-		return ErrInviteNotFound
-	}
-
-	return nil
+	return checkAffectedRows(result, ErrInviteNotFound)
 }
 
 func (r *postgresInviteRepository) DeleteByTeamID(ctx context.Context, teamID int) (int64, error) {
@@ -161,9 +152,9 @@ func (r *postgresInviteRepository) DeleteByTeamID(ctx context.Context, teamID in
 	if err != nil {
 		return 0, fmt.Errorf("failed to delete invites by team id: %w", err)
 	}
-	rowsAffected, checkErr := checkRowsAffected(result)
-	if checkErr != nil {
-		return 0, fmt.Errorf("failed to check affected rows on invite delete by team id: %w", checkErr)
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to check affected rows on invite delete by team id: %w", err)
 	}
 	return rowsAffected, nil
 }
@@ -174,9 +165,9 @@ func (r *postgresInviteRepository) CleanupExpired(ctx context.Context) (int64, e
 	if err != nil {
 		return 0, fmt.Errorf("failed to cleanup expired invites: %w", err)
 	}
-	rowsAffected, checkErr := checkRowsAffected(result)
-	if checkErr != nil {
-		return 0, fmt.Errorf("failed to check affected rows on expired invite cleanup: %w", checkErr)
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to check affected rows on expired invite cleanup: %w", err)
 	}
 	return rowsAffected, nil
 }

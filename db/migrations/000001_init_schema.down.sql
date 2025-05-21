@@ -4,6 +4,7 @@
 DROP TABLE IF EXISTS invites CASCADE;
 DROP TABLE IF EXISTS team_matches CASCADE;
 DROP TABLE IF EXISTS solo_matches CASCADE;
+DROP TABLE IF EXISTS team_matches CASCADE;
 DROP TABLE IF EXISTS participants CASCADE;
 DROP TABLE IF EXISTS tournaments CASCADE;
 
@@ -23,5 +24,10 @@ DROP TYPE IF EXISTS match_status;
 DROP TYPE IF EXISTS participant_status;
 DROP TYPE IF EXISTS tournament_status;
 DROP TYPE IF EXISTS user_role;
+
+ALTER TABLE formats
+    DROP COLUMN settings_json,
+    DROP COLUMN participant_type,
+    DROP COLUMN bracket_type;
 
 -- +migrate StatementEnd

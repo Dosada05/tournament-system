@@ -104,19 +104,28 @@ CREATE INDEX idx_participants_status ON participants (status);
 CREATE TABLE solo_matches (
                               id SERIAL PRIMARY KEY,
                               tournament_id INT NOT NULL,
-                              p1_participant_id INT NOT NULL,
-                              p2_participant_id INT CHECK (p1_participant_id <> p2_participant_id),
+                              p1_participant_id INT,
+                              p2_participant_id INT,
                               score VARCHAR(50),
                               match_time TIMESTAMPTZ NOT NULL,
                               status match_status NOT NULL,
-                              winner_participant_id INT CHECK (winner_participant_id IS NULL OR winner_participant_id = p1_participant_id OR winner_participant_id = p2_participant_id),
+                              winner_participant_id INT,
                               round INT,
                               created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                              bracket_match_uid VARCHAR(255) UNIQUE,
+                              next_match_db_id INT,
+                              winner_to_slot SMALLINT,
+
                               FOREIGN KEY (tournament_id) REFERENCES tournaments (id) ON DELETE CASCADE,
                               FOREIGN KEY (p1_participant_id) REFERENCES participants (id) ON DELETE CASCADE,
                               FOREIGN KEY (p2_participant_id) REFERENCES participants (id) ON DELETE CASCADE,
-                              FOREIGN KEY (winner_participant_id) REFERENCES participants (id) ON DELETE SET NULL
+                              FOREIGN KEY (winner_participant_id) REFERENCES participants (id) ON DELETE SET NULL,
+                              FOREIGN KEY (next_match_db_id) REFERENCES solo_matches (id) ON DELETE SET NULL, -- Ссылка на самого себя
+                              CONSTRAINT chk_solo_distinct_participants CHECK (p1_participant_id IS NULL OR p2_participant_id IS NULL OR p1_participant_id <> p2_participant_id),
+                              CONSTRAINT chk_solo_winner CHECK (winner_participant_id IS NULL OR winner_participant_id = p1_participant_id OR winner_participant_id = p2_participant_id),
+                              CONSTRAINT chk_winner_to_slot CHECK (winner_to_slot IS NULL OR winner_to_slot IN (1, 2))
 );
+CREATE INDEX idx_solo_matches_bracket_match_uid ON solo_matches (bracket_match_uid);
 CREATE INDEX idx_solo_matches_tournament_id ON solo_matches (tournament_id);
 CREATE INDEX idx_solo_matches_p1_participant_id ON solo_matches (p1_participant_id);
 CREATE INDEX idx_solo_matches_p2_participant_id ON solo_matches (p2_participant_id);
@@ -127,19 +136,29 @@ CREATE INDEX idx_solo_matches_match_time ON solo_matches (match_time);
 CREATE TABLE team_matches (
                               id SERIAL PRIMARY KEY,
                               tournament_id INT NOT NULL,
-                              t1_participant_id INT NOT NULL,
-                              t2_participant_id INT CHECK (t1_participant_id <> t2_participant_id),
+                              t1_participant_id INT,
+                              t2_participant_id INT,
                               score VARCHAR(50),
                               match_time TIMESTAMPTZ NOT NULL,
                               status match_status NOT NULL,
-                              winner_participant_id INT CHECK (winner_participant_id IS NULL OR winner_participant_id = t1_participant_id OR winner_participant_id = t2_participant_id), -- Ссылка на победившего участника
+                              winner_participant_id INT,
                               round INT,
                               created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+                              bracket_match_uid VARCHAR(255) UNIQUE,
+                              next_match_db_id INT,
+                              winner_to_slot SMALLINT,
+
                               FOREIGN KEY (tournament_id) REFERENCES tournaments (id) ON DELETE CASCADE,
                               FOREIGN KEY (t1_participant_id) REFERENCES participants (id) ON DELETE CASCADE,
                               FOREIGN KEY (t2_participant_id) REFERENCES participants (id) ON DELETE CASCADE,
-                              FOREIGN KEY (winner_participant_id) REFERENCES participants (id) ON DELETE SET NULL
+                              FOREIGN KEY (winner_participant_id) REFERENCES participants (id) ON DELETE SET NULL,
+                              FOREIGN KEY (next_match_db_id) REFERENCES team_matches (id) ON DELETE SET NULL, -- Ссылка на самого себя
+                              CONSTRAINT chk_team_distinct_participants CHECK (t1_participant_id IS NULL OR t2_participant_id IS NULL OR t1_participant_id <> t2_participant_id),
+                              CONSTRAINT chk_team_winner CHECK (winner_participant_id IS NULL OR winner_participant_id = t1_participant_id OR winner_participant_id = t2_participant_id),
+                              CONSTRAINT chk_team_winner_to_slot CHECK (winner_to_slot IS NULL OR winner_to_slot IN (1, 2))
 );
+CREATE INDEX idx_team_matches_bracket_match_uid ON team_matches (bracket_match_uid);
 CREATE INDEX idx_team_matches_tournament_id ON team_matches (tournament_id);
 CREATE INDEX idx_team_matches_t1_participant_id ON team_matches (t1_participant_id);
 CREATE INDEX idx_team_matches_t2_participant_id ON team_matches (t2_participant_id);
@@ -178,3 +197,14 @@ ALTER TABLE sports
 -- Добавляем поле для ключа логотипа в таблицу tournaments
 ALTER TABLE tournaments
     ADD COLUMN logo_key VARCHAR(255);
+
+-- Новая миграция для изменения таблицы formats
+ALTER TABLE formats
+    ADD COLUMN bracket_type VARCHAR(50) NOT NULL DEFAULT 'UNKNOWN',
+    ADD COLUMN participant_type VARCHAR(10) NOT NULL DEFAULT 'solo',
+    ADD COLUMN settings_json TEXT;
+
+-- Можно добавить CHECK constraint для participant_type
+ALTER TABLE formats ADD CONSTRAINT chk_format_participant_type CHECK (participant_type IN ('solo', 'team'));
+
+

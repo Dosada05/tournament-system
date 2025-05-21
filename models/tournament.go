@@ -39,3 +39,23 @@ type Tournament struct {
 	SoloMatches  []SoloMatch   `json:"solo_matches,omitempty" db:"-"`
 	TeamMatches  []TeamMatch   `json:"team_matches,omitempty" db:"-"`
 }
+
+func (t Tournament) Deadline() (deadline time.Time, ok bool) {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (t Tournament) Done() <-chan struct{} {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (t Tournament) Err() error {
+	//TODO implement me
+	panic("implement me")
+}
+
+func (t Tournament) Value(key any) any {
+	//TODO implement me
+	panic("implement me")
+}

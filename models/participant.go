@@ -22,8 +22,8 @@ type Participant struct {
 	User            *User       `json:"user,omitempty" db:"-"`
 	Team            *Team       `json:"team,omitempty" db:"-"`
 	Tournament      *Tournament `json:"tournament,omitempty" db:"-"`
-	SoloMatchesAsP1 []SoloMatch `json:"solo_matches_as_p1,omitempty" db:"-"` // Матчи, где этот участник P1
-	SoloMatchesAsP2 []SoloMatch `json:"solo_matches_as_p2,omitempty" db:"-"` // Матчи, где этот участник P2
-	TeamMatchesAsT1 []TeamMatch `json:"team_matches_as_t1,omitempty" db:"-"` // Матчи, где этот участник T1
-	TeamMatchesAsT2 []TeamMatch `json:"team_matches_as_t2,omitempty" db:"-"` // Матчи, где этот участник T2
+	SoloMatchesAsP1 []SoloMatch `json:"solo_matches_as_p1,omitempty" db:"-"`
+	SoloMatchesAsP2 []SoloMatch `json:"solo_matches_as_p2,omitempty" db:"-"`
+	TeamMatchesAsT1 []TeamMatch `json:"team_matches_as_t1,omitempty" db:"-"`
+	TeamMatchesAsT2 []TeamMatch `json:"team_matches_as_t2,omitempty" db:"-"`
 }
