@@ -19,7 +19,7 @@ type FormatRepository interface {
 	Create(ctx context.Context, format *models.Format) error
 	GetByID(ctx context.Context, id int) (*models.Format, error)
 	GetAll(ctx context.Context) ([]models.Format, error)
-	Update(ctx context.Context, format *models.Format) error
+	Update(ctx context.Context, format *models.Format) error // Обновление также должно учитывать все поля
 	Delete(ctx context.Context, id int) error
 }
 
@@ -32,12 +32,26 @@ func NewPostgresFormatRepository(db *sql.DB) FormatRepository {
 }
 
 func (r *postgresFormatRepository) Create(ctx context.Context, format *models.Format) error {
-	query := `INSERT INTO formats (name) VALUES ($1) RETURNING id`
-	err := r.db.QueryRowContext(ctx, query, format.Name).Scan(&format.ID)
+	// При создании теперь нужно передавать все поля
+	query := `
+		INSERT INTO formats (name, bracket_type, participant_type, settings_json) 
+		VALUES ($1, $2, $3, $4) 
+		RETURNING id`
+	err := r.db.QueryRowContext(ctx, query,
+		format.Name,
+		format.BracketType,
+		format.ParticipantType,
+		format.SettingsJSON,
+	).Scan(&format.ID)
+
 	if err != nil {
 		if pqErr, ok := err.(*pq.Error); ok {
 			if pqErr.Code == "23505" && pqErr.Constraint == "formats_name_key" {
 				return ErrFormatNameConflict
+			}
+			// Обработка нарушения CHECK constraint chk_format_participant_type
+			if pqErr.Code == "23514" && pqErr.Constraint == "chk_format_participant_type" {
+				return errors.New("invalid participant_type value for format")
 			}
 		}
 		return err
@@ -46,9 +60,19 @@ func (r *postgresFormatRepository) Create(ctx context.Context, format *models.Fo
 }
 
 func (r *postgresFormatRepository) GetByID(ctx context.Context, id int) (*models.Format, error) {
-	query := `SELECT id, name FROM formats WHERE id = $1`
+	// Теперь выбираем все поля
+	query := `
+		SELECT id, name, bracket_type, participant_type, settings_json 
+		FROM formats 
+		WHERE id = $1`
 	format := &models.Format{}
-	err := r.db.QueryRowContext(ctx, query, id).Scan(&format.ID, &format.Name)
+	err := r.db.QueryRowContext(ctx, query, id).Scan(
+		&format.ID,
+		&format.Name,
+		&format.BracketType,
+		&format.ParticipantType,
+		&format.SettingsJSON, // settings_json может быть NULL, поэтому &format.SettingsJSON
+	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrFormatNotFound
@@ -59,7 +83,11 @@ func (r *postgresFormatRepository) GetByID(ctx context.Context, id int) (*models
 }
 
 func (r *postgresFormatRepository) GetAll(ctx context.Context) ([]models.Format, error) {
-	query := `SELECT id, name FROM formats ORDER BY name ASC`
+	// Также выбираем все поля
+	query := `
+		SELECT id, name, bracket_type, participant_type, settings_json 
+		FROM formats 
+		ORDER BY name ASC`
 	rows, err := r.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
@@ -69,7 +97,13 @@ func (r *postgresFormatRepository) GetAll(ctx context.Context) ([]models.Format,
 	formats := make([]models.Format, 0)
 	for rows.Next() {
 		var format models.Format
-		if scanErr := rows.Scan(&format.ID, &format.Name); scanErr != nil {
+		if scanErr := rows.Scan(
+			&format.ID,
+			&format.Name,
+			&format.BracketType,
+			&format.ParticipantType,
+			&format.SettingsJSON,
+		); scanErr != nil {
 			return nil, scanErr
 		}
 		formats = append(formats, format)
@@ -83,26 +117,31 @@ func (r *postgresFormatRepository) GetAll(ctx context.Context) ([]models.Format,
 }
 
 func (r *postgresFormatRepository) Update(ctx context.Context, format *models.Format) error {
-	query := `UPDATE formats SET name = $1 WHERE id = $2`
-	result, err := r.db.ExecContext(ctx, query, format.Name, format.ID)
+	// Обновляем все поля, которые могут быть изменены
+	query := `
+		UPDATE formats 
+		SET name = $1, bracket_type = $2, participant_type = $3, settings_json = $4
+		WHERE id = $5`
+	result, err := r.db.ExecContext(ctx, query,
+		format.Name,
+		format.BracketType,
+		format.ParticipantType,
+		format.SettingsJSON,
+		format.ID,
+	)
 	if err != nil {
 		if pqErr, ok := err.(*pq.Error); ok {
 			if pqErr.Code == "23505" && pqErr.Constraint == "formats_name_key" {
 				return ErrFormatNameConflict
 			}
+			if pqErr.Code == "23514" && pqErr.Constraint == "chk_format_participant_type" {
+				return errors.New("invalid participant_type value for format update")
+			}
 		}
 		return err
 	}
 
-	rowsAffected, checkErr := checkRowsAffected(result)
-	if checkErr != nil {
-		return checkErr
-	}
-	if rowsAffected == 0 {
-		return ErrFormatNotFound
-	}
-
-	return nil
+	return checkAffectedRows(result, ErrFormatNotFound)
 }
 
 func (r *postgresFormatRepository) Delete(ctx context.Context, id int) error {
@@ -110,10 +149,8 @@ func (r *postgresFormatRepository) Delete(ctx context.Context, id int) error {
 	result, err := r.db.ExecContext(ctx, query, id)
 	if err != nil {
 		if pqErr, ok := err.(*pq.Error); ok {
-			if pqErr.Code == "23503" {
-				// Предполагаем, что FK на formats есть только у tournaments
-				// Имя constraint может быть другим!
-				if pqErr.Constraint == "tournaments_format_id_fkey" {
+			if pqErr.Code == "23503" { // foreign_key_violation
+				if pqErr.Constraint == "tournaments_format_id_fkey" { // Пример имени constraint
 					return ErrFormatInUse
 				}
 			}
@@ -121,13 +158,5 @@ func (r *postgresFormatRepository) Delete(ctx context.Context, id int) error {
 		return err
 	}
 
-	rowsAffected, checkErr := checkRowsAffected(result)
-	if checkErr != nil {
-		return checkErr
-	}
-	if rowsAffected == 0 {
-		return ErrFormatNotFound
-	}
-
-	return nil
+	return checkAffectedRows(result, ErrFormatNotFound)
 }

@@ -41,8 +41,6 @@ func Authenticate(next http.Handler) http.Handler {
 			return
 		}
 
-		log.Printf("Received token string (partial): %s...", tokenString[:min(len(tokenString), 10)])
-
 		parsedToken, err := jwt.Parse(tokenString, func(t *jwt.Token) (interface{}, error) {
 			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 				log.Printf("Unexpected signing method: %v", t.Header["alg"])
@@ -86,7 +84,6 @@ func Authenticate(next http.Handler) http.Handler {
 
 		// Используем userContextKey (типа contextKey) вместо строкового userKey
 		ctx := context.WithValue(r.Context(), userContextKey, claims)
-		log.Printf("Token validated successfully. Claims added to context.")
 
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})

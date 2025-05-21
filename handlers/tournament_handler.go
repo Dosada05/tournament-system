@@ -3,6 +3,7 @@ package handlers
 import (
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 
@@ -13,10 +14,9 @@ import (
 
 type TournamentHandler struct {
 	tournamentService services.TournamentService
-	matchService      services.MatchService // Добавляем зависимость
+	matchService      services.MatchService
 }
 
-// Обновляем конструктор
 func NewTournamentHandler(ts services.TournamentService, ms services.MatchService) *TournamentHandler {
 	return &TournamentHandler{
 		tournamentService: ts,
@@ -24,6 +24,7 @@ func NewTournamentHandler(ts services.TournamentService, ms services.MatchServic
 	}
 }
 
+// CreateHandler создает новый турнир.
 func (h *TournamentHandler) CreateHandler(w http.ResponseWriter, r *http.Request) {
 	currentUserID, err := middleware.GetUserIDFromContext(r.Context())
 	if err != nil {
@@ -39,7 +40,7 @@ func (h *TournamentHandler) CreateHandler(w http.ResponseWriter, r *http.Request
 
 	tournament, err := h.tournamentService.CreateTournament(r.Context(), currentUserID, input)
 	if err != nil {
-		mapServiceErrorToHTTP(w, r, err) // Используем общий маппер
+		mapServiceErrorToHTTP(w, r, err)
 		return
 	}
 
@@ -48,6 +49,7 @@ func (h *TournamentHandler) CreateHandler(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// GetByIDHandler получает турнир по ID.
 func (h *TournamentHandler) GetByIDHandler(w http.ResponseWriter, r *http.Request) {
 	id, err := getIDFromURL(r, "tournamentID")
 	if err != nil {
@@ -55,7 +57,7 @@ func (h *TournamentHandler) GetByIDHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	currentUserID, _ := middleware.GetUserIDFromContext(r.Context())
+	currentUserID, _ := middleware.GetUserIDFromContext(r.Context()) // ID для возможной кастомизации ответа
 
 	tournament, err := h.tournamentService.GetTournamentByID(r.Context(), id, currentUserID)
 	if err != nil {
@@ -68,6 +70,7 @@ func (h *TournamentHandler) GetByIDHandler(w http.ResponseWriter, r *http.Reques
 	}
 }
 
+// ListHandler получает список турниров с фильтрацией.
 func (h *TournamentHandler) ListHandler(w http.ResponseWriter, r *http.Request) {
 	var filter services.ListTournamentsFilter
 	query := r.URL.Query()
@@ -97,9 +100,23 @@ func (h *TournamentHandler) ListHandler(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	if statusStr := query.Get("status"); statusStr != "" {
+		// Валидация значения статуса должна быть строже
+		// Например, через switch или map
+		validStatuses := map[models.TournamentStatus]bool{
+			models.StatusSoon:         true,
+			models.StatusRegistration: true,
+			models.StatusActive:       true,
+			models.StatusCompleted:    true,
+			models.StatusCanceled:     true,
+		}
 		status := models.TournamentStatus(statusStr)
+		if !validStatuses[status] {
+			badRequestResponse(w, r, fmt.Errorf("invalid status query parameter: %s", statusStr))
+			return
+		}
 		filter.Status = &status
 	}
+
 	if limitStr := query.Get("limit"); limitStr != "" {
 		if limit, err := strconv.Atoi(limitStr); err == nil && limit > 0 {
 			filter.Limit = limit
@@ -108,8 +125,9 @@ func (h *TournamentHandler) ListHandler(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 	} else {
-		filter.Limit = 20
+		filter.Limit = 20 // Значение по умолчанию
 	}
+
 	if offsetStr := query.Get("offset"); offsetStr != "" {
 		if offset, err := strconv.Atoi(offsetStr); err == nil && offset >= 0 {
 			filter.Offset = offset
@@ -117,6 +135,8 @@ func (h *TournamentHandler) ListHandler(w http.ResponseWriter, r *http.Request) 
 			badRequestResponse(w, r, errors.New("invalid offset query parameter"))
 			return
 		}
+	} else {
+		filter.Offset = 0 // Значение по умолчанию
 	}
 
 	tournaments, err := h.tournamentService.ListTournaments(r.Context(), filter)
@@ -130,6 +150,7 @@ func (h *TournamentHandler) ListHandler(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+// UpdateDetailsHandler обновляет детали турнира.
 func (h *TournamentHandler) UpdateDetailsHandler(w http.ResponseWriter, r *http.Request) {
 	id, err := getIDFromURL(r, "tournamentID")
 	if err != nil {
@@ -160,6 +181,7 @@ func (h *TournamentHandler) UpdateDetailsHandler(w http.ResponseWriter, r *http.
 	}
 }
 
+// UpdateStatusHandler обновляет статус турнира.
 func (h *TournamentHandler) UpdateStatusHandler(w http.ResponseWriter, r *http.Request) {
 	id, err := getIDFromURL(r, "tournamentID")
 	if err != nil {
@@ -180,6 +202,11 @@ func (h *TournamentHandler) UpdateStatusHandler(w http.ResponseWriter, r *http.R
 		badRequestResponse(w, r, err)
 		return
 	}
+	// Дополнительная валидация значения статуса
+	if !isValidTournamentStatus(statusInput.Status) {
+		badRequestResponse(w, r, fmt.Errorf("invalid status value: %s", statusInput.Status))
+		return
+	}
 
 	tournament, err := h.tournamentService.UpdateTournamentStatus(r.Context(), id, currentUserID, statusInput.Status)
 	if err != nil {
@@ -192,6 +219,7 @@ func (h *TournamentHandler) UpdateStatusHandler(w http.ResponseWriter, r *http.R
 	}
 }
 
+// DeleteHandler удаляет турнир.
 func (h *TournamentHandler) DeleteHandler(w http.ResponseWriter, r *http.Request) {
 	id, err := getIDFromURL(r, "tournamentID")
 	if err != nil {
@@ -214,6 +242,7 @@ func (h *TournamentHandler) DeleteHandler(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// UploadTournamentLogoHandler загружает логотип для турнира.
 func (h *TournamentHandler) UploadTournamentLogoHandler(w http.ResponseWriter, r *http.Request) {
 	tournamentID, err := getIDFromURL(r, "tournamentID")
 	if err != nil {
@@ -233,7 +262,7 @@ func (h *TournamentHandler) UploadTournamentLogoHandler(w http.ResponseWriter, r
 		return
 	}
 
-	file, header, err := r.FormFile("logo") // "logo" - имя поля в форме
+	file, header, err := r.FormFile("logo")
 	if err != nil {
 		badRequestResponse(w, r, fmt.Errorf("failed to get logo file from form: %w", err))
 		return
@@ -248,7 +277,7 @@ func (h *TournamentHandler) UploadTournamentLogoHandler(w http.ResponseWriter, r
 
 	tournament, err := h.tournamentService.UploadTournamentLogo(r.Context(), tournamentID, currentUserID, file, contentType)
 	if err != nil {
-		mapServiceErrorToHTTP(w, r, err) // Используем общий маппер
+		mapServiceErrorToHTTP(w, r, err)
 		return
 	}
 
@@ -256,4 +285,128 @@ func (h *TournamentHandler) UploadTournamentLogoHandler(w http.ResponseWriter, r
 	if err := writeJSON(w, http.StatusOK, response, nil); err != nil {
 		serverErrorResponse(w, r, err)
 	}
+}
+
+// UpdateSoloMatchResultHandler обновляет результат одиночного матча.
+func (h *TournamentHandler) UpdateSoloMatchResultHandler(w http.ResponseWriter, r *http.Request) {
+	tournamentID, err := getIDFromURL(r, "tournamentID")
+	if err != nil {
+		badRequestResponse(w, r, fmt.Errorf("invalid tournament ID: %w", err))
+		return
+	}
+	matchID, err := getIDFromURL(r, "matchID")
+	if err != nil {
+		badRequestResponse(w, r, fmt.Errorf("invalid match ID: %w", err))
+		return
+	}
+
+	currentUserID, err := middleware.GetUserIDFromContext(r.Context())
+	if err != nil {
+		unauthorizedResponse(w, r, "authentication required to update match result")
+		return
+	}
+
+	var input services.UpdateMatchResultInput
+	if err := readJSON(w, r, &input); err != nil {
+		badRequestResponse(w, r, err)
+		return
+	}
+
+	updatedMatch, err := h.matchService.UpdateSoloMatchResult(r.Context(), matchID, tournamentID, input, currentUserID)
+	if err != nil {
+		mapServiceErrorToHTTP(w, r, err)
+		return
+	}
+
+	// Проверяем, не завершился ли турнир
+	if updatedMatch.NextMatchDBID == nil && updatedMatch.WinnerParticipantID != nil {
+		// Это был финальный матч, и он завершен
+		log.Printf("Handler: Final solo match %d completed for tournament %d. Attempting to finalize tournament.", updatedMatch.ID, tournamentID)
+		_, finalizeErr := h.tournamentService.FinalizeTournament(r.Context(), tournamentID, *updatedMatch.WinnerParticipantID, currentUserID)
+		if finalizeErr != nil {
+			// Логируем ошибку финализации, но результат матча уже обновлен.
+			// Клиент получит уведомление о завершении матча, а затем, возможно, об ошибке финализации.
+			// Или, если это критично, можно вернуть ошибку клиенту.
+			log.Printf("Error finalizing tournament %d after match %d: %v", tournamentID, updatedMatch.ID, finalizeErr)
+			// Пока не возвращаем ошибку клиенту, чтобы он увидел результат матча.
+			// mapServiceErrorToHTTP(w, r, finalizeErr)
+			// return
+		}
+	}
+
+	if err := writeJSON(w, http.StatusOK, jsonResponse{"solo_match": updatedMatch}, nil); err != nil {
+		serverErrorResponse(w, r, err)
+	}
+}
+
+// UpdateTeamMatchResultHandler обновляет результат командного матча.
+func (h *TournamentHandler) UpdateTeamMatchResultHandler(w http.ResponseWriter, r *http.Request) {
+	tournamentID, err := getIDFromURL(r, "tournamentID")
+	if err != nil {
+		badRequestResponse(w, r, fmt.Errorf("invalid tournament ID: %w", err))
+		return
+	}
+	matchID, err := getIDFromURL(r, "matchID")
+	if err != nil {
+		badRequestResponse(w, r, fmt.Errorf("invalid match ID: %w", err))
+		return
+	}
+
+	currentUserID, err := middleware.GetUserIDFromContext(r.Context())
+	if err != nil {
+		unauthorizedResponse(w, r, "authentication required to update match result")
+		return
+	}
+
+	var input services.UpdateMatchResultInput
+	if err := readJSON(w, r, &input); err != nil {
+		badRequestResponse(w, r, err)
+		return
+	}
+
+	updatedMatch, err := h.matchService.UpdateTeamMatchResult(r.Context(), matchID, tournamentID, input, currentUserID)
+	if err != nil {
+		mapServiceErrorToHTTP(w, r, err)
+		return
+	}
+
+	if updatedMatch.NextMatchDBID == nil && updatedMatch.WinnerParticipantID != nil {
+		log.Printf("Handler: Final team match %d completed for tournament %d. Attempting to finalize tournament.", updatedMatch.ID, tournamentID)
+		_, finalizeErr := h.tournamentService.FinalizeTournament(r.Context(), tournamentID, *updatedMatch.WinnerParticipantID, currentUserID)
+		if finalizeErr != nil {
+			log.Printf("Error finalizing tournament %d after match %d: %v", tournamentID, updatedMatch.ID, finalizeErr)
+		}
+	}
+
+	if err := writeJSON(w, http.StatusOK, jsonResponse{"team_match": updatedMatch}, nil); err != nil {
+		serverErrorResponse(w, r, err)
+	}
+}
+
+// Новый обработчик для получения данных сетки
+func (h *TournamentHandler) GetTournamentBracketHandler(w http.ResponseWriter, r *http.Request) {
+	tournamentID, err := getIDFromURL(r, "tournamentID")
+	if err != nil {
+		badRequestResponse(w, r, err)
+		return
+	}
+
+	bracketData, err := h.tournamentService.GetTournamentBracketData(r.Context(), tournamentID)
+	if err != nil {
+		mapServiceErrorToHTTP(w, r, err)
+		return
+	}
+
+	if err := writeJSON(w, http.StatusOK, bracketData, nil); err != nil { // Отправляем напрямую bracketData
+		serverErrorResponse(w, r, err)
+	}
+}
+
+// isValidTournamentStatus (можно вынести в helpers, если используется в других хендлерах)
+func isValidTournamentStatus(status models.TournamentStatus) bool {
+	switch status {
+	case models.StatusSoon, models.StatusRegistration, models.StatusActive, models.StatusCompleted, models.StatusCanceled:
+		return true
+	}
+	return false
 }

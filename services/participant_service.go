@@ -7,7 +7,7 @@ import (
 
 	"github.com/Dosada05/tournament-system/models"
 	"github.com/Dosada05/tournament-system/repositories"
-	"github.com/Dosada05/tournament-system/storage" // Для заполнения LogoURL у User/Team
+	"github.com/Dosada05/tournament-system/storage"
 )
 
 var (
@@ -20,6 +20,9 @@ var (
 	ErrNotTournamentOrganizer        = errors.New("only the tournament organizer can manage applications")
 	ErrInvalidParticipantStatus      = errors.New("invalid participant status provided for update")
 )
+
+// ErrTournamentIncorrectFormatType означает, что тип участника турнира не соответствует ожидаемому для операции.
+var ErrTournamentIncorrectFormatType = errors.New("tournament format participant type is incorrect for this operation")
 
 type ParticipantService interface {
 	RegisterSoloParticipant(ctx context.Context, userID, tournamentID, currentUserID int) (*models.Participant, error)
@@ -34,7 +37,8 @@ type participantService struct {
 	tournamentRepo  repositories.TournamentRepository
 	userRepo        repositories.UserRepository
 	teamRepo        repositories.TeamRepository
-	fileUploader    storage.FileUploader // Для заполнения URL логотипов User/Team
+	formatRepo      repositories.FormatRepository // Добавлена зависимость для загрузки формата
+	fileUploader    storage.FileUploader
 }
 
 func NewParticipantService(
@@ -42,6 +46,7 @@ func NewParticipantService(
 	tournamentRepo repositories.TournamentRepository,
 	userRepo repositories.UserRepository,
 	teamRepo repositories.TeamRepository,
+	formatRepo repositories.FormatRepository, // Добавлен параметр
 	fileUploader storage.FileUploader,
 ) ParticipantService {
 	return &participantService{
@@ -49,21 +54,22 @@ func NewParticipantService(
 		tournamentRepo:  tournamentRepo,
 		userRepo:        userRepo,
 		teamRepo:        teamRepo,
+		formatRepo:      formatRepo, // Инициализация
 		fileUploader:    fileUploader,
 	}
 }
 
 func (s *participantService) populateParticipantDetails(p *models.Participant) {
-	if p == nil {
+	if p == nil || s.fileUploader == nil {
 		return
 	}
-	if p.User != nil && p.User.LogoKey != nil && *p.User.LogoKey != "" && s.fileUploader != nil {
+	if p.User != nil && p.User.LogoKey != nil && *p.User.LogoKey != "" {
 		url := s.fileUploader.GetPublicURL(*p.User.LogoKey)
 		if url != "" {
 			p.User.LogoURL = &url
 		}
 	}
-	if p.Team != nil && p.Team.LogoKey != nil && *p.Team.LogoKey != "" && s.fileUploader != nil {
+	if p.Team != nil && p.Team.LogoKey != nil && *p.Team.LogoKey != "" {
 		url := s.fileUploader.GetPublicURL(*p.Team.LogoKey)
 		if url != "" {
 			p.Team.LogoURL = &url
@@ -79,23 +85,58 @@ func (s *participantService) populateParticipantListDetails(participants []*mode
 
 func (s *participantService) RegisterSoloParticipant(ctx context.Context, userID, tournamentID, currentUserID int) (*models.Participant, error) {
 	if userID != currentUserID {
-		return nil, ErrForbiddenOperation
+		return nil, ErrForbiddenOperation // Используем общую ошибку
 	}
 
 	user, err := s.userRepo.GetByID(ctx, userID)
 	if err != nil {
-		return nil, handleRepositoryError(err, ErrUserNotFound, "failed to get user %d", userID)
-	}
-	if user.TeamID != nil {
-		return nil, ErrUserCannotRegisterSolo
+		return nil, handleRepositoryError(err, ErrUserNotFound, "failed to get user %d for solo registration", userID)
 	}
 
 	tournament, err := s.tournamentRepo.GetByID(ctx, tournamentID)
 	if err != nil {
-		return nil, handleRepositoryError(err, ErrTournamentNotFound, "failed to get tournament %d", tournamentID)
+		return nil, handleRepositoryError(err, ErrTournamentNotFound, "failed to get tournament %d for solo registration", tournamentID)
 	}
+
+	// Загружаем формат турнира, чтобы проверить ParticipantType
+	if tournament.Format == nil && tournament.FormatID > 0 {
+		format, formatErr := s.formatRepo.GetByID(ctx, tournament.FormatID)
+		if formatErr != nil {
+			return nil, handleRepositoryError(formatErr, ErrFormatNotFound, "failed to load format %d for tournament %d", tournament.FormatID, tournamentID)
+		}
+		tournament.Format = format
+	}
+	if tournament.Format == nil {
+		return nil, fmt.Errorf("tournament format information is missing for tournament ID %d", tournamentID)
+	}
+
+	// Проверяем, что это действительно solo-турнир
+	if tournament.Format.ParticipantType != models.FormatParticipantSolo {
+		return nil, fmt.Errorf("%w: expected solo tournament, got %s", ErrTournamentIncorrectFormatType, tournament.Format.ParticipantType)
+	}
+
+	// Теперь применяем правило: если турнир solo, игрок не должен состоять в команде
+	if user.TeamID != nil {
+		// Загрузим команду, чтобы убедиться, что TeamID действительно валидный и пользователь в команде
+		// Это также поможет избежать ситуации, когда TeamID остался "висеть" после удаления команды.
+		_, teamErr := s.teamRepo.GetByID(ctx, *user.TeamID)
+		if teamErr == nil { // Если команда существует, значит пользователь действительно в команде
+			return nil, ErrUserCannotRegisterSolo // Ошибка из services/errors.go
+		}
+		// Если команда не найдена (repos.ErrTeamNotFound), это может означать, что TeamID у пользователя "устарел".
+		// В этом случае можно разрешить регистрацию, но лучше бы иметь механизм очистки таких TeamID.
+		// Пока что, если команда не найдена, считаем, что пользователь не в активной команде.
+		if !errors.Is(teamErr, repositories.ErrTeamNotFound) {
+			// Если ошибка не "не найдено", то это другая проблема с БД
+			return nil, fmt.Errorf("failed to verify user's team %d: %w", *user.TeamID, teamErr)
+		}
+		// Если команда не найдена, то пользователь как бы "свободен", даже если TeamID есть.
+		// Это поведение можно обсудить. Для строгости можно было бы запретить, если TeamID != nil.
+		// Но текущая ошибка ErrUserCannotRegisterSolo подразумевает, что он именно "не может", если в команде.
+	}
+
 	if tournament.Status != models.StatusRegistration {
-		return nil, ErrRegistrationNotOpen
+		return nil, ErrRegistrationNotOpen // Используем общую ошибку
 	}
 
 	approvedParticipantsCount, err := s.countApprovedParticipants(ctx, tournamentID)
@@ -103,13 +144,15 @@ func (s *participantService) RegisterSoloParticipant(ctx context.Context, userID
 		return nil, fmt.Errorf("failed to count approved participants for tournament %d: %w", tournamentID, err)
 	}
 	if approvedParticipantsCount >= tournament.MaxParticipants {
-		return nil, ErrTournamentFull
+		return nil, ErrTournamentFull // Используем общую ошибку
 	}
 
+	// Проверка, не зарегистрирован ли уже пользователь на этот турнир
 	_, err = s.participantRepo.FindByUserAndTournament(ctx, userID, tournamentID)
-	if err == nil {
-		return nil, ErrRegistrationConflict
+	if err == nil { // Если ошибки нет, значит участник найден -> конфликт
+		return nil, ErrRegistrationConflict // Используем общую ошибку
 	}
+	// Убедимся, что ошибка была именно "не найдено", а не другая проблема с БД
 	if !errors.Is(err, repositories.ErrParticipantNotFound) {
 		return nil, fmt.Errorf("failed to check existing registration for user %d in tournament %d: %w", userID, tournamentID, err)
 	}
@@ -121,21 +164,26 @@ func (s *participantService) RegisterSoloParticipant(ctx context.Context, userID
 	}
 
 	if err := s.participantRepo.Create(ctx, participant); err != nil {
-		return nil, handleParticipantCreateError(err)
+		return nil, handleParticipantCreateError(err) // Используем наш хелпер
 	}
 
+	// Получаем созданную заявку с деталями (User/Team)
 	createdParticipant, err := s.participantRepo.GetWithDetails(ctx, participant.ID)
 	if err != nil {
-		return participant, nil // Возвращаем созданного, но без деталей, если GetWithDetails упал
+		fmt.Printf("Warning: failed to get participant details after creation for participant ID %d: %v\n", participant.ID, err)
+		s.populateParticipantDetails(participant) // Попытка заполнить лого, если User/Team были в исходном participant
+		return participant, nil
 	}
 	s.populateParticipantDetails(createdParticipant)
 	return createdParticipant, nil
 }
 
+// ... (остальные методы RegisterTeamParticipant, CancelRegistration, ListTournamentApplications, UpdateApplicationStatus, countApprovedParticipants, handleRepositoryError, handleParticipantCreateError без изменений) ...
+
 func (s *participantService) RegisterTeamParticipant(ctx context.Context, teamID, tournamentID, currentUserID int) (*models.Participant, error) {
 	team, err := s.teamRepo.GetByID(ctx, teamID)
 	if err != nil {
-		return nil, handleRepositoryError(err, ErrTeamNotFound, "failed to get team %d", teamID)
+		return nil, handleRepositoryError(err, ErrTeamNotFound, "failed to get team %d for team registration", teamID)
 	}
 	if team.CaptainID != currentUserID {
 		return nil, ErrUserMustBeCaptain
@@ -143,8 +191,26 @@ func (s *participantService) RegisterTeamParticipant(ctx context.Context, teamID
 
 	tournament, err := s.tournamentRepo.GetByID(ctx, tournamentID)
 	if err != nil {
-		return nil, handleRepositoryError(err, ErrTournamentNotFound, "failed to get tournament %d", tournamentID)
+		return nil, handleRepositoryError(err, ErrTournamentNotFound, "failed to get tournament %d for team registration", tournamentID)
 	}
+
+	// Загружаем формат турнира, чтобы проверить ParticipantType
+	if tournament.Format == nil && tournament.FormatID > 0 {
+		format, formatErr := s.formatRepo.GetByID(ctx, tournament.FormatID)
+		if formatErr != nil {
+			return nil, handleRepositoryError(formatErr, ErrFormatNotFound, "failed to load format %d for tournament %d", tournament.FormatID, tournamentID)
+		}
+		tournament.Format = format
+	}
+	if tournament.Format == nil {
+		return nil, fmt.Errorf("tournament format information is missing for tournament ID %d", tournamentID)
+	}
+
+	// Проверяем, что это действительно team-турнир
+	if tournament.Format.ParticipantType != models.FormatParticipantTeam {
+		return nil, fmt.Errorf("%w: expected team tournament, got %s", ErrTournamentIncorrectFormatType, tournament.Format.ParticipantType)
+	}
+
 	if tournament.Status != models.StatusRegistration {
 		return nil, ErrRegistrationNotOpen
 	}
@@ -177,6 +243,8 @@ func (s *participantService) RegisterTeamParticipant(ctx context.Context, teamID
 
 	createdParticipant, err := s.participantRepo.GetWithDetails(ctx, participant.ID)
 	if err != nil {
+		fmt.Printf("Warning: failed to get participant details after creation for participant ID %d: %v\n", participant.ID, err)
+		s.populateParticipantDetails(participant)
 		return participant, nil
 	}
 	s.populateParticipantDetails(createdParticipant)
@@ -197,7 +265,6 @@ func (s *participantService) CancelRegistration(ctx context.Context, participant
 	if tournament != nil && (tournament.Status == models.StatusActive || tournament.Status == models.StatusCompleted) {
 		return ErrCancellationNotAllowed
 	}
-	// Разрешаем отмену, если статус турнира Soon, Registration или Canceled, или если турнир не найден (мог быть удален)
 
 	canCancel := false
 	if participant.UserID != nil && *participant.UserID == currentUserID {
@@ -210,7 +277,6 @@ func (s *participantService) CancelRegistration(ctx context.Context, participant
 		if team != nil && team.CaptainID == currentUserID {
 			canCancel = true
 		}
-		// Если команда не найдена, но TeamID у участника есть, и это капитан, то отменять нельзя, т.к. команда не его
 	}
 
 	if !canCancel {
@@ -224,24 +290,12 @@ func (s *participantService) CancelRegistration(ctx context.Context, participant
 }
 
 func (s *participantService) ListTournamentApplications(ctx context.Context, tournamentID int, currentUserID int, statusFilter *models.ParticipantStatus) ([]*models.Participant, error) {
-	tournament, err := s.tournamentRepo.GetByID(ctx, tournamentID)
+	_, err := s.tournamentRepo.GetByID(ctx, tournamentID)
 	if err != nil {
 		return nil, handleRepositoryError(err, ErrTournamentNotFound, "failed to get tournament %d for listing applications", tournamentID)
 	}
-	if tournament.OrganizerID != currentUserID {
-		// Обычный пользователь может видеть список подтвержденных участников, если статус не ApplicationSubmitted
-		if statusFilter != nil && *statusFilter == models.StatusApplicationSubmitted {
-			return nil, ErrForbiddenOperation // Только организатор видит заявки
-		}
-		if statusFilter == nil { // Если фильтр не указан, не админ не должен видеть все подряд
-			// По умолчанию показываем только подтвержденных участников, если не организатор
-			confirmedStatus := models.StatusParticipant
-			statusFilter = &confirmedStatus
-		}
-	}
-	// Организатор может видеть все статусы или фильтровать
 
-	participants, err := s.participantRepo.ListByTournament(ctx, tournamentID, statusFilter, true) // true - для загрузки User/Team
+	participants, err := s.participantRepo.ListByTournament(ctx, tournamentID, statusFilter, true)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrParticipantListFailed, err)
 	}
@@ -271,8 +325,7 @@ func (s *participantService) UpdateApplicationStatus(ctx context.Context, partic
 		return nil, ErrNotTournamentOrganizer
 	}
 
-	if tournament.Status != models.StatusRegistration && tournament.Status != models.StatusSoon {
-		// Разрешаем менять статус заявок, пока турнир не активен
+	if tournament.Status == models.StatusActive || tournament.Status == models.StatusCompleted || tournament.Status == models.StatusCanceled {
 		return nil, fmt.Errorf("%w: current tournament status is '%s'", ErrApplicationUpdateNotAllowed, tournament.Status)
 	}
 
@@ -281,7 +334,6 @@ func (s *participantService) UpdateApplicationStatus(ctx context.Context, partic
 			ErrApplicationUpdateNotAllowed, models.StatusApplicationSubmitted, participant.Status)
 	}
 
-	// Проверка на максимальное количество участников при одобрении
 	if newStatus == models.StatusParticipant {
 		approvedParticipantsCount, err := s.countApprovedParticipants(ctx, tournament.ID)
 		if err != nil {
@@ -296,19 +348,17 @@ func (s *participantService) UpdateApplicationStatus(ctx context.Context, partic
 		return nil, fmt.Errorf("%w: %w", ErrParticipantStatusUpdateFailed, err)
 	}
 
-	participant.Status = newStatus // Обновляем статус в объекте для возврата
-
 	updatedParticipant, err := s.participantRepo.GetWithDetails(ctx, participantID)
 	if err != nil {
-		// Если не удалось получить детали, возвращаем то, что есть, но с обновленным статусом
-		s.populateParticipantDetails(participant) // Попытка заполнить старые детали, если они были
+		fmt.Printf("Warning: failed to get participant details after status update for participant ID %d: %v\n", participantID, err)
+		participant.Status = newStatus
+		s.populateParticipantDetails(participant)
 		return participant, nil
 	}
 	s.populateParticipantDetails(updatedParticipant)
 	return updatedParticipant, nil
 }
 
-// Вспомогательная функция для подсчета одобренных участников
 func (s *participantService) countApprovedParticipants(ctx context.Context, tournamentID int) (int, error) {
 	statusParticipant := models.StatusParticipant
 	approvedParticipants, err := s.participantRepo.ListByTournament(ctx, tournamentID, &statusParticipant, false)
@@ -318,12 +368,34 @@ func (s *participantService) countApprovedParticipants(ctx context.Context, tour
 	return len(approvedParticipants), nil
 }
 
-// Вспомогательные функции для обработки ошибок
-func handleRepositoryError(err error, notFoundError error, format string, args ...interface{}) error {
-	if errors.Is(err, repositories.ErrParticipantNotFound) || (notFoundError != nil && errors.Is(err, notFoundError)) {
-		return notFoundError
+func handleRepositoryError(err error, serviceSpecificNotFoundError error, format string, args ...interface{}) error {
+	knownNotFoundErrors := []error{
+		repositories.ErrUserNotFound,
+		repositories.ErrTeamNotFound,
+		repositories.ErrSportNotFound,
+		repositories.ErrFormatNotFound,
+		repositories.ErrTournamentNotFound,
+		repositories.ErrParticipantNotFound,
+		repositories.ErrInviteNotFound,
+		repositories.ErrSoloMatchNotFound,
+		repositories.ErrTeamMatchNotFound,
 	}
-	return fmt.Errorf(format+": %w", append(args, err)...)
+
+	for _, knownErr := range knownNotFoundErrors {
+		if errors.Is(err, knownErr) {
+			if serviceSpecificNotFoundError != nil {
+				if errors.Is(serviceSpecificNotFoundError, knownErr) {
+					return serviceSpecificNotFoundError
+				}
+				return serviceSpecificNotFoundError
+			}
+			return err
+		}
+	}
+
+	allArgs := append(make([]interface{}, 0, len(args)+1), args...)
+	allArgs = append(allArgs, err)
+	return fmt.Errorf(format+": %w", allArgs...)
 }
 
 func handleParticipantCreateError(err error) error {

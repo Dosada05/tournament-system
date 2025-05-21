@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"errors"
-	"fmt"
 	"github.com/Dosada05/tournament-system/middleware"
 	"github.com/Dosada05/tournament-system/models"
 	"github.com/Dosada05/tournament-system/services"
@@ -168,20 +167,7 @@ func (h *ParticipantHandler) ListApplications(w http.ResponseWriter, r *http.Req
 	// currentUserID нужен сервису для проверки прав на просмотр заявок
 	currentUserID, _ := middleware.GetUserIDFromContext(r.Context()) // Ошибка здесь не критична, если ID = 0, сервис разберется
 
-	var statusFilter *models.ParticipantStatus
-	statusQuery := r.URL.Query().Get("status")
-	if statusQuery != "" {
-		s := models.ParticipantStatus(statusQuery)
-		// Простая валидация значения статуса (можно улучшить)
-		if s == models.StatusApplicationSubmitted || s == models.StatusParticipant || s == models.StatusApplicationRejected {
-			statusFilter = &s
-		} else {
-			badRequestResponse(w, r, fmt.Errorf("invalid status query parameter: %s", statusQuery))
-			return
-		}
-	}
-
-	participants, err := h.participantService.ListTournamentApplications(r.Context(), tournamentID, currentUserID, statusFilter)
+	participants, err := h.participantService.ListTournamentApplications(r.Context(), tournamentID, currentUserID, nil)
 	if err != nil {
 		mapServiceErrorToHTTP(w, r, err)
 		return

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 
@@ -19,11 +20,13 @@ var (
 )
 
 type TeamMatchRepository interface {
-	Create(ctx context.Context, match *models.TeamMatch) error
+	Create(ctx context.Context, exec SQLExecutor, match *models.TeamMatch) error
 	GetByID(ctx context.Context, id int) (*models.TeamMatch, error)
 	ListByTournament(ctx context.Context, tournamentID int, round *int, status *models.MatchStatus) ([]*models.TeamMatch, error)
 	UpdateScoreStatusWinner(ctx context.Context, id int, score *string, status models.MatchStatus, winnerParticipantID *int) error
 	Delete(ctx context.Context, id int) error
+	UpdateNextMatchInfo(ctx context.Context, exec SQLExecutor, matchID int, nextMatchDBID *int, winnerToSlot *int) error
+	UpdateParticipants(ctx context.Context, exec SQLExecutor, matchID int, t1ParticipantID *int, t2ParticipantID *int) error
 }
 
 type postgresTeamMatchRepository struct {
@@ -34,14 +37,15 @@ func NewPostgresTeamMatchRepository(db *sql.DB) TeamMatchRepository {
 	return &postgresTeamMatchRepository{db: db}
 }
 
-func (r *postgresTeamMatchRepository) Create(ctx context.Context, match *models.TeamMatch) error {
+func (r *postgresTeamMatchRepository) Create(ctx context.Context, exec SQLExecutor, match *models.TeamMatch) error {
 	query := `
-		INSERT INTO team_matches
-			(tournament_id, t1_participant_id, t2_participant_id, score, match_time, status, winner_participant_id, round)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		RETURNING id, created_at`
+        INSERT INTO team_matches
+            (tournament_id, t1_participant_id, t2_participant_id, score, match_time, 
+             status, winner_participant_id, round, bracket_match_uid, next_match_db_id, winner_to_slot)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        RETURNING id, created_at`
 
-	err := r.db.QueryRowContext(ctx, query,
+	err := exec.QueryRowContext(ctx, query,
 		match.TournamentID,
 		match.T1ParticipantID,
 		match.T2ParticipantID,
@@ -50,6 +54,9 @@ func (r *postgresTeamMatchRepository) Create(ctx context.Context, match *models.
 		match.Status,
 		match.WinnerParticipantID,
 		match.Round,
+		match.BracketMatchUID,
+		match.NextMatchDBID,
+		match.WinnerToSlot,
 	).Scan(&match.ID, &match.CreatedAt)
 
 	return r.handleTeamMatchError(err)
@@ -57,7 +64,8 @@ func (r *postgresTeamMatchRepository) Create(ctx context.Context, match *models.
 
 func (r *postgresTeamMatchRepository) GetByID(ctx context.Context, id int) (*models.TeamMatch, error) {
 	query := `
-		SELECT id, tournament_id, t1_participant_id, t2_participant_id, score, match_time, status, winner_participant_id, round, created_at
+		SELECT id, tournament_id, t1_participant_id, t2_participant_id, score, match_time, status, 
+		       winner_participant_id, round, created_at, bracket_match_uid, next_match_db_id, winner_to_slot
 		FROM team_matches
 		WHERE id = $1`
 
@@ -73,13 +81,16 @@ func (r *postgresTeamMatchRepository) GetByID(ctx context.Context, id int) (*mod
 		&match.WinnerParticipantID,
 		&match.Round,
 		&match.CreatedAt,
+		&match.BracketMatchUID,
+		&match.NextMatchDBID,
+		&match.WinnerToSlot,
 	)
 
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrTeamMatchNotFound
 		}
-		return nil, err
+		return nil, fmt.Errorf("failed to scan team match by id %d: %w", id, err)
 	}
 	return match, nil
 }
@@ -87,7 +98,8 @@ func (r *postgresTeamMatchRepository) GetByID(ctx context.Context, id int) (*mod
 func (r *postgresTeamMatchRepository) ListByTournament(ctx context.Context, tournamentID int, roundFilter *int, statusFilter *models.MatchStatus) ([]*models.TeamMatch, error) {
 	var queryBuilder strings.Builder
 	queryBuilder.WriteString(`
-		SELECT id, tournament_id, t1_participant_id, t2_participant_id, score, match_time, status, winner_participant_id, round, created_at
+		SELECT id, tournament_id, t1_participant_id, t2_participant_id, score, match_time, status, 
+		       winner_participant_id, round, created_at, bracket_match_uid, next_match_db_id, winner_to_slot
 		FROM team_matches
 		WHERE tournament_id = $1`)
 
@@ -105,15 +117,15 @@ func (r *postgresTeamMatchRepository) ListByTournament(ctx context.Context, tour
 		queryBuilder.WriteString(" AND status = $")
 		queryBuilder.WriteString(strconv.Itoa(placeholderIndex))
 		args = append(args, *statusFilter)
-		placeholderIndex++
+		// placeholderIndex++ // Не инкрементируем здесь
 	}
 
-	queryBuilder.WriteString(" ORDER BY round ASC, match_time ASC")
+	queryBuilder.WriteString(" ORDER BY round ASC, id ASC") // Добавил id для стабильной сортировки
 
 	finalQuery := queryBuilder.String()
 	rows, err := r.db.QueryContext(ctx, finalQuery, args...)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to query team matches for tournament %d: %w", tournamentID, err)
 	}
 	defer rows.Close()
 
@@ -131,14 +143,17 @@ func (r *postgresTeamMatchRepository) ListByTournament(ctx context.Context, tour
 			&match.WinnerParticipantID,
 			&match.Round,
 			&match.CreatedAt,
+			&match.BracketMatchUID,
+			&match.NextMatchDBID,
+			&match.WinnerToSlot,
 		); scanErr != nil {
-			return nil, scanErr
+			return nil, fmt.Errorf("failed to scan team match row: %w", scanErr)
 		}
 		matches = append(matches, &match)
 	}
 
 	if err = rows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error during team match rows iteration: %w", err)
 	}
 
 	return matches, nil
@@ -154,16 +169,7 @@ func (r *postgresTeamMatchRepository) UpdateScoreStatusWinner(ctx context.Contex
 	if err != nil {
 		return r.handleTeamMatchError(err)
 	}
-
-	rowsAffected, checkErr := checkRowsAffected(result) // Используем тот же общий хелпер
-	if checkErr != nil {
-		return checkErr
-	}
-	if rowsAffected == 0 {
-		return ErrTeamMatchNotFound
-	}
-
-	return nil
+	return checkAffectedRows(result, ErrTeamMatchNotFound)
 }
 
 func (r *postgresTeamMatchRepository) Delete(ctx context.Context, id int) error {
@@ -172,16 +178,25 @@ func (r *postgresTeamMatchRepository) Delete(ctx context.Context, id int) error 
 	if err != nil {
 		return err
 	}
+	return checkAffectedRows(result, ErrTeamMatchNotFound)
+}
 
-	rowsAffected, checkErr := checkRowsAffected(result)
-	if checkErr != nil {
-		return checkErr
+func (r *postgresTeamMatchRepository) UpdateNextMatchInfo(ctx context.Context, exec SQLExecutor, matchID int, nextMatchDBID *int, winnerToSlot *int) error {
+	query := `UPDATE team_matches SET next_match_db_id = $1, winner_to_slot = $2 WHERE id = $3`
+	result, err := exec.ExecContext(ctx, query, nextMatchDBID, winnerToSlot, matchID)
+	if err != nil {
+		return fmt.Errorf("UpdateNextMatchInfo: failed to execute query for team_match %d: %w", matchID, err)
 	}
-	if rowsAffected == 0 {
-		return ErrTeamMatchNotFound
-	}
+	return checkAffectedRows(result, ErrTeamMatchNotFound)
+}
 
-	return nil
+func (r *postgresTeamMatchRepository) UpdateParticipants(ctx context.Context, exec SQLExecutor, matchID int, t1ParticipantID *int, t2ParticipantID *int) error {
+	query := `UPDATE team_matches SET t1_participant_id = $1, t2_participant_id = $2 WHERE id = $3`
+	result, err := exec.ExecContext(ctx, query, t1ParticipantID, t2ParticipantID, matchID)
+	if err != nil {
+		return fmt.Errorf("UpdateParticipants: failed to execute query for team_match %d: %w", matchID, err)
+	}
+	return checkAffectedRows(result, ErrTeamMatchNotFound)
 }
 
 func (r *postgresTeamMatchRepository) handleTeamMatchError(err error) error {
@@ -189,16 +204,15 @@ func (r *postgresTeamMatchRepository) handleTeamMatchError(err error) error {
 		return nil
 	}
 	if pqErr, ok := err.(*pq.Error); ok {
-		if pqErr.Code == "23503" { // foreign_key_violation
-			// ЗАМЕНИТЕ имена constraint на реальные для team_matches!
-			switch pqErr.Constraint {
-			case "team_matches_tournament_id_fkey":
-				return ErrTeamMatchTournamentInvalid
-			case "team_matches_t1_participant_id_fkey", "team_matches_t2_participant_id_fkey":
-				return ErrTeamMatchParticipantInvalid
-			case "team_matches_winner_participant_id_fkey":
-				return ErrTeamMatchWinnerParticipantInvalid
-			}
+		switch pqErr.Constraint {
+		case "team_matches_tournament_id_fkey":
+			return ErrTeamMatchTournamentInvalid
+		case "team_matches_t1_participant_id_fkey", "team_matches_t2_participant_id_fkey":
+			return ErrTeamMatchParticipantInvalid
+		case "team_matches_winner_participant_id_fkey":
+			return ErrTeamMatchWinnerParticipantInvalid
+		case "team_matches_bracket_match_uid_key": // Предполагаемое имя constraint
+			return fmt.Errorf("bracket_match_uid conflict: %w", err)
 		}
 	}
 	return err
