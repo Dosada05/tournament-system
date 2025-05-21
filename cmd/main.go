@@ -23,9 +23,11 @@ import (
 	_ "github.com/lib/pq"
 )
 
+const schedulerInterval = 30 * time.Second // How often the scheduler runs
+
 func main() {
 	// Настройка логгера
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})) // Default to Info level
 
 	// Загрузка конфигурации
 	cfg, err := config.Load()
@@ -85,14 +87,15 @@ func main() {
 	authService := services.NewAuthService(userRepo)
 	userService := services.NewUserService(userRepo, cloudflareUploader)
 	sportService := services.NewSportService(sportRepo, userRepo, cloudflareUploader)
-	formatService := services.NewFormatService(formatRepo) // Инициализация FormatService
+	formatService := services.NewFormatService(formatRepo)
 	teamService := services.NewTeamService(teamRepo, userRepo, sportRepo, cloudflareUploader)
 	inviteService := services.NewInviteService(inviteRepo, teamRepo, userRepo)
-	bracketService := services.NewBracketService(dbConn, formatRepo, participantRepo, soloMatchRepo, teamMatchRepo)
 
-	// Обновление инициализации MatchService
+	// BracketService does not need dbConn directly if its methods requiring DB access get SQLExecutor
+	bracketService := services.NewBracketService(formatRepo, participantRepo, soloMatchRepo, teamMatchRepo)
+
 	matchService := services.NewMatchService(
-		dbConn,
+		dbConn, // For its own transactions if needed
 		soloMatchRepo,
 		teamMatchRepo,
 		tournamentRepo,
@@ -101,36 +104,62 @@ func main() {
 	)
 
 	tournamentService := services.NewTournamentService(
+		dbConn, // Pass dbConn for transaction management
 		tournamentRepo,
 		sportRepo,
 		formatRepo,
 		userRepo,
 		participantRepo,
+		soloMatchRepo,
+		teamMatchRepo,
 		bracketService,
-		matchService, // TournamentService может использовать MatchService для каких-то операций
+		matchService,
 		cloudflareUploader,
 		wsHub,
+		logger,
 	)
 	participantService := services.NewParticipantService(
 		participantRepo,
 		tournamentRepo,
 		userRepo,
 		teamRepo,
-		formatRepo,
+		formatRepo, // Pass formatRepo
 		cloudflareUploader,
 	)
 	logger.Info("Services initialized")
+
+	// Запуск планировщика автоматического обновления статусов турниров
+	go func() {
+		ticker := time.NewTicker(schedulerInterval)
+		defer ticker.Stop()
+		logger.Info("Tournament status update scheduler started", slog.Duration("interval", schedulerInterval))
+
+		// Run once immediately at startup, then on ticker
+		if err := tournamentService.AutoUpdateTournamentStatusesByDates(context.Background()); err != nil {
+			logger.Error("Scheduler: initial run failed", slog.Any("error", err))
+		}
+
+		for {
+			select {
+			case <-ticker.C:
+				logger.Info("Scheduler: triggering automatic tournament status update.")
+				if err := tournamentService.AutoUpdateTournamentStatusesByDates(context.Background()); err != nil {
+					logger.Error("Scheduler: periodic run failed", slog.Any("error", err))
+				}
+			}
+		}
+	}()
 
 	// Инициализация обработчиков HTTP
 	authHandler := handlers.NewAuthHandler(authService, cfg.JWTSecretKey)
 	userHandler := handlers.NewUserHandler(userService)
 	teamHandler := handlers.NewTeamHandler(teamService, userService)
 	sportHandler := handlers.NewSportHandler(sportService)
-	formatHandler := handlers.NewFormatHandler(formatService) // Инициализация FormatHandler
+	formatHandler := handlers.NewFormatHandler(formatService)
 	tournamentHandler := handlers.NewTournamentHandler(tournamentService, matchService)
 	inviteHandler := handlers.NewInviteHandler(inviteService)
 	participantHandler := handlers.NewParticipantHandler(participantService)
-	webSocketHandler := handlers.NewWebSocketHandler(wsHub /*, tournamentService */) // tournamentService можно передать, если нужен для проверок при подключении
+	webSocketHandler := handlers.NewWebSocketHandler(wsHub)
 	logger.Info("HTTP handlers initialized")
 
 	// Настройка маршрутизатора
@@ -179,12 +208,14 @@ func main() {
 		}
 	case sig := <-quit:
 		logger.Info("shutdown signal received", slog.String("signal", sig.String()))
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
+		// Create a context with timeout for shutdown.
+		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancelShutdown()
 
 		logger.Info("shutting down server", slog.Duration("timeout", 15*time.Second))
-		if err := server.Shutdown(ctx); err != nil {
+		if err := server.Shutdown(shutdownCtx); err != nil {
 			logger.Error("graceful shutdown failed", slog.Any("error", err))
+			// If shutdown fails, force close.
 			if closeErr := server.Close(); closeErr != nil {
 				logger.Error("failed to force close server", slog.Any("error", closeErr))
 			}

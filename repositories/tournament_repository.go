@@ -5,7 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	_ "time"
+	"time"
 
 	"github.com/Dosada05/tournament-system/models"
 	"github.com/lib/pq"
@@ -34,9 +34,10 @@ type TournamentRepository interface {
 	GetByID(ctx context.Context, id int) (*models.Tournament, error)
 	List(ctx context.Context, filter ListTournamentsFilter) ([]models.Tournament, error)
 	Update(ctx context.Context, tournament *models.Tournament) error
-	UpdateStatus(ctx context.Context, id int, status models.TournamentStatus) error
+	UpdateStatus(ctx context.Context, exec SQLExecutor, id int, status models.TournamentStatus) error
 	Delete(ctx context.Context, id int) error
 	UpdateLogoKey(ctx context.Context, tournamentID int, logoKey *string) error
+	GetTournamentsForAutoStatusUpdate(ctx context.Context, exec SQLExecutor, currentTime time.Time) ([]*models.Tournament, error)
 }
 
 type postgresTournamentRepository struct {
@@ -170,7 +171,7 @@ func (r *postgresTournamentRepository) Update(ctx context.Context, t *models.Tou
 			location = $9,
 			status = $10,
 			max_participants = $11
-		WHERE id = $12`
+		WHERE id = $12` // Assuming logo_key is updated separately or not in this general update
 
 	result, err := r.db.ExecContext(ctx, query,
 		t.Name, t.Description, t.SportID, t.FormatID, t.OrganizerID,
@@ -182,16 +183,16 @@ func (r *postgresTournamentRepository) Update(ctx context.Context, t *models.Tou
 		return r.handleTournamentError(err)
 	}
 
-	return r.checkAffected(result)
+	return checkAffectedRows(result, ErrTournamentNotFound) // Using shared helper
 }
 
-func (r *postgresTournamentRepository) UpdateStatus(ctx context.Context, id int, status models.TournamentStatus) error {
+func (r *postgresTournamentRepository) UpdateStatus(ctx context.Context, exec SQLExecutor, id int, status models.TournamentStatus) error {
 	query := `UPDATE tournaments SET status = $1 WHERE id = $2`
-	result, err := r.db.ExecContext(ctx, query, status, id)
+	result, err := exec.ExecContext(ctx, query, status, id)
 	if err != nil {
 		return r.handleTournamentError(err)
 	}
-	return r.checkAffected(result)
+	return checkAffectedRows(result, ErrTournamentNotFound) // Using shared helper
 }
 
 func (r *postgresTournamentRepository) UpdateLogoKey(ctx context.Context, tournamentID int, logoKey *string) error {
@@ -200,7 +201,7 @@ func (r *postgresTournamentRepository) UpdateLogoKey(ctx context.Context, tourna
 	if err != nil {
 		return fmt.Errorf("failed to update tournament logo key: %w", err)
 	}
-	return r.checkAffected(result)
+	return checkAffectedRows(result, ErrTournamentNotFound) // Using shared helper
 }
 
 func (r *postgresTournamentRepository) Delete(ctx context.Context, id int) error {
@@ -209,7 +210,57 @@ func (r *postgresTournamentRepository) Delete(ctx context.Context, id int) error
 	if err != nil {
 		return r.handleTournamentError(err)
 	}
-	return r.checkAffected(result)
+	return checkAffectedRows(result, ErrTournamentNotFound) // Using shared helper
+}
+
+// GetTournamentsForAutoStatusUpdate fetches tournaments that might need a status update.
+// It considers tournaments not yet 'completed' or 'canceled'.
+// It checks:
+// - 'soon' tournaments if reg_date has passed.
+// - 'registration' tournaments if start_date has passed.
+// - 'active' tournaments if end_date has passed.
+func (r *postgresTournamentRepository) GetTournamentsForAutoStatusUpdate(ctx context.Context, exec SQLExecutor, currentTime time.Time) ([]*models.Tournament, error) {
+	query := `
+		SELECT
+			id, name, description, sport_id, format_id, organizer_id,
+			reg_date, start_date, end_date, location, status, max_participants, created_at, logo_key
+		FROM tournaments
+		WHERE status NOT IN ($1, $2) -- 'completed', 'canceled'
+		AND (
+			(status = $3 AND reg_date <= $4) OR    -- 'soon' AND reg_date <= now
+			(status = $5 AND start_date <= $4) OR -- 'registration' AND start_date <= now
+			(status = $6 AND end_date <= $4)      -- 'active' AND end_date <= now
+		)`
+	args := []interface{}{
+		models.StatusCompleted,    // $1
+		models.StatusCanceled,     // $2
+		models.StatusSoon,         // $3
+		currentTime,               // $4
+		models.StatusRegistration, // $5
+		models.StatusActive,       // $6
+	}
+
+	rows, err := exec.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query tournaments for auto status update: %w", err)
+	}
+	defer rows.Close()
+
+	tournaments := make([]*models.Tournament, 0)
+	for rows.Next() {
+		var t models.Tournament
+		if scanErr := rows.Scan(
+			&t.ID, &t.Name, &t.Description, &t.SportID, &t.FormatID, &t.OrganizerID,
+			&t.RegDate, &t.StartDate, &t.EndDate, &t.Location, &t.Status, &t.MaxParticipants, &t.CreatedAt, &t.LogoKey,
+		); scanErr != nil {
+			return nil, fmt.Errorf("failed to scan tournament for auto status update: %w", scanErr)
+		}
+		tournaments = append(tournaments, &t)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error during tournament rows iteration for auto status update: %w", err)
+	}
+	return tournaments, nil
 }
 
 func (r *postgresTournamentRepository) handleTournamentError(err error) error {
@@ -218,11 +269,11 @@ func (r *postgresTournamentRepository) handleTournamentError(err error) error {
 	}
 	if pqErr, ok := err.(*pq.Error); ok {
 		switch pqErr.Code {
-		case "23505":
-			if pqErr.Constraint == "tournaments_organizer_id_name_key" { // Предполагая, что такой constraint есть
+		case "23505": // unique_violation
+			if pqErr.Constraint == "tournaments_organizer_id_name_key" { // Ensure this constraint exists for name uniqueness per organizer
 				return ErrTournamentNameConflict
 			}
-		case "23503":
+		case "23503": // foreign_key_violation
 			switch pqErr.Constraint {
 			case "tournaments_sport_id_fkey":
 				return ErrTournamentInvalidSport
@@ -231,23 +282,11 @@ func (r *postgresTournamentRepository) handleTournamentError(err error) error {
 			case "tournaments_organizer_id_fkey":
 				return ErrTournamentInvalidOrg
 			default:
-				// Если это constraint, связанный с participants или matches, то это ErrTournamentInUse
-				// Здесь сложно точно определить без знания всех constraint'ов,
-				// но для удаления это будет основной причиной FK violation.
+				// This case can cover FK violations from participants or matches tables pointing to tournaments,
+				// indicating the tournament is in use.
 				return ErrTournamentInUse
 			}
 		}
 	}
 	return err
-}
-
-func (r *postgresTournamentRepository) checkAffected(result sql.Result) error {
-	rowsAffected, err := result.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("failed to check affected rows: %w", err)
-	}
-	if rowsAffected == 0 {
-		return ErrTournamentNotFound
-	}
-	return nil
 }

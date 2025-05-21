@@ -5,11 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
-
 	"github.com/Dosada05/tournament-system/models"
 	"github.com/lib/pq"
+	"strconv"
+	"strings"
 )
 
 type SQLExecutor interface {
