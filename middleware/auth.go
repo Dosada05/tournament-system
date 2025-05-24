@@ -8,23 +8,18 @@ import (
 	"strings"
 	_ "time"
 
-	"github.com/Dosada05/tournament-system/models" // Импортируем models для Role
+	"github.com/Dosada05/tournament-system/models"
 	"github.com/Dosada05/tournament-system/utils"
-	"github.com/golang-jwt/jwt/v4" // Используем golang-jwt/jwt/v4, как в helpers.go
-	// Убираем зависимость от chi/jwtauth, если используется кастомная валидация
-	// "github.com/go-chi/jwtauth"
+	"github.com/golang-jwt/jwt/v4"
 )
 
 const (
 	bearerPrefix = "Bearer "
 )
 
-// Определяем тип ключа контекста здесь же или в helpers.go
 type contextKey string
 
-const userContextKey contextKey = "user" // Используем типизированный ключ
-
-// Убираем глобальную переменную tokenAuth, если не используется jwtauth
+const userContextKey contextKey = "user"
 
 func Authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +68,6 @@ func Authenticate(next http.Handler) http.Handler {
 			return
 		}
 
-		// Проверяем наличие необходимых claims перед добавлением в контекст
 		_, idOk := claims[jwtClaimUserID] // Используем константу для имени claim ID
 		_, roleOk := claims[jwtClaimRole] // Используем константу для имени claim Role
 		if !idOk || !roleOk {
@@ -82,7 +76,6 @@ func Authenticate(next http.Handler) http.Handler {
 			return
 		}
 
-		// Используем userContextKey (типа contextKey) вместо строкового userKey
 		ctx := context.WithValue(r.Context(), userContextKey, claims)
 
 		next.ServeHTTP(w, r.WithContext(ctx))
@@ -96,7 +89,6 @@ func Authorize(roles ...models.UserRole) func(http.Handler) http.Handler {
 			userRole, err := GetUserRoleFromContext(r.Context())
 			if err != nil {
 				log.Printf("Authorization failed: %v", err)
-				// Ошибка из GetUserRoleFromContext может быть из-за отсутствия claims или неверного типа
 				http.Error(w, "Unauthorized", http.StatusUnauthorized) // Или Forbidden, если аутентификация прошла, но роль не извлечь
 				return
 			}
@@ -128,7 +120,6 @@ func extractToken(r *http.Request) (string, error) {
 	}
 
 	if !strings.HasPrefix(authHeader, bearerPrefix) {
-		log.Printf("Invalid Authorization header format: does not start with '%s'", bearerPrefix)
 		return "", errors.New("invalid authorization header format") // Возвращаем ошибку
 	}
 

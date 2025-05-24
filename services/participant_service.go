@@ -98,6 +98,10 @@ func (s *participantService) RegisterSoloParticipant(ctx context.Context, userID
 		return nil, handleRepositoryError(err, ErrTournamentNotFound, "failed to get tournament %d for solo registration", tournamentID)
 	}
 
+	if tournament.OrganizerID == currentUserID { // currentUserID здесь это userID регистрирующегося
+		return nil, ErrOrganizerCannotParticipate
+	}
+
 	// Загружаем формат турнира, чтобы проверить ParticipantType
 	if tournament.Format == nil && tournament.FormatID > 0 {
 		format, formatErr := s.formatRepo.GetByID(ctx, tournament.FormatID)
@@ -192,6 +196,10 @@ func (s *participantService) RegisterTeamParticipant(ctx context.Context, teamID
 	tournament, err := s.tournamentRepo.GetByID(ctx, tournamentID)
 	if err != nil {
 		return nil, handleRepositoryError(err, ErrTournamentNotFound, "failed to get tournament %d for team registration", tournamentID)
+	}
+
+	if tournament.OrganizerID == currentUserID {
+		return nil, ErrOrganizerCannotParticipate
 	}
 
 	// Загружаем формат турнира, чтобы проверить ParticipantType

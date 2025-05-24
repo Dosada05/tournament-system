@@ -23,8 +23,7 @@ type User struct {
 	LogoKey      *string   `json:"-" db:"logo_key"`
 	LogoURL      *string   `json:"logo_url,omitempty" db:"-"`
 
-	Team         *Team         `json:"team,omitempty" db:"-"`
-	Participants []Participant `json:"participants,omitempty" db:"-"`
+	Team *Team `json:"team,omitempty" db:"-"`
 }
 
 // Credentials используется для передачи данных аутентификации (логин/пароль).
