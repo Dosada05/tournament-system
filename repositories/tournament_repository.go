@@ -37,6 +37,7 @@ type TournamentRepository interface {
 	UpdateStatus(ctx context.Context, exec SQLExecutor, id int, status models.TournamentStatus) error
 	Delete(ctx context.Context, id int) error
 	UpdateLogoKey(ctx context.Context, tournamentID int, logoKey *string) error
+	UpdateOverallWinner(ctx context.Context, exec SQLExecutor, tournamentID int, winnerParticipantID *int) error // Added
 	GetTournamentsForAutoStatusUpdate(ctx context.Context, exec SQLExecutor, currentTime time.Time) ([]*models.Tournament, error)
 }
 
@@ -48,15 +49,24 @@ func NewPostgresTournamentRepository(db *sql.DB) TournamentRepository {
 	return &postgresTournamentRepository{db: db}
 }
 
+func (r *postgresTournamentRepository) getExecutor(exec SQLExecutor) SQLExecutor {
+	if exec != nil {
+		return exec
+	}
+	return r.db
+}
+
 func (r *postgresTournamentRepository) Create(ctx context.Context, t *models.Tournament) error {
+	executor := r.getExecutor(nil)
+	// overall_winner_participant_id is not set on creation
 	query := `
 		INSERT INTO tournaments (
 			name, description, sport_id, format_id, organizer_id,
-			reg_date, start_date, end_date, location, status, max_participants, logo_key
+			reg_date, start_date, end_date, location, status, max_participants, logo_key 
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 		RETURNING id, created_at`
 
-	err := r.db.QueryRowContext(ctx, query,
+	err := executor.QueryRowContext(ctx, query,
 		t.Name, t.Description, t.SportID, t.FormatID, t.OrganizerID,
 		t.RegDate, t.StartDate, t.EndDate, t.Location, t.Status, t.MaxParticipants, t.LogoKey,
 	).Scan(&t.ID, &t.CreatedAt)
@@ -65,17 +75,20 @@ func (r *postgresTournamentRepository) Create(ctx context.Context, t *models.Tou
 }
 
 func (r *postgresTournamentRepository) GetByID(ctx context.Context, id int) (*models.Tournament, error) {
+	executor := r.getExecutor(nil)
 	query := `
 		SELECT
 			id, name, description, sport_id, format_id, organizer_id,
-			reg_date, start_date, end_date, location, status, max_participants, created_at, logo_key
+			reg_date, start_date, end_date, location, status, max_participants, created_at, logo_key,
+			overall_winner_participant_id
 		FROM tournaments
 		WHERE id = $1`
 
 	t := &models.Tournament{}
-	err := r.db.QueryRowContext(ctx, query, id).Scan(
+	err := executor.QueryRowContext(ctx, query, id).Scan(
 		&t.ID, &t.Name, &t.Description, &t.SportID, &t.FormatID, &t.OrganizerID,
 		&t.RegDate, &t.StartDate, &t.EndDate, &t.Location, &t.Status, &t.MaxParticipants, &t.CreatedAt, &t.LogoKey,
+		&t.OverallWinnerParticipantID, // Added scan for the new field
 	)
 
 	if err != nil {
@@ -88,10 +101,12 @@ func (r *postgresTournamentRepository) GetByID(ctx context.Context, id int) (*mo
 }
 
 func (r *postgresTournamentRepository) List(ctx context.Context, filter ListTournamentsFilter) ([]models.Tournament, error) {
+	executor := r.getExecutor(nil)
 	query := `
 		SELECT
 			id, name, description, sport_id, format_id, organizer_id,
-			reg_date, start_date, end_date, location, status, max_participants, created_at, logo_key
+			reg_date, start_date, end_date, location, status, max_participants, created_at, logo_key,
+			overall_winner_participant_id
 		FROM tournaments
 		WHERE 1=1`
 
@@ -129,10 +144,10 @@ func (r *postgresTournamentRepository) List(ctx context.Context, filter ListTour
 	if filter.Offset > 0 {
 		query += fmt.Sprintf(" OFFSET $%d", argID)
 		args = append(args, filter.Offset)
-		argID++
+		// argID++ // No need to increment here
 	}
 
-	rows, err := r.db.QueryContext(ctx, query, args...)
+	rows, err := executor.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -144,6 +159,7 @@ func (r *postgresTournamentRepository) List(ctx context.Context, filter ListTour
 		if scanErr := rows.Scan(
 			&t.ID, &t.Name, &t.Description, &t.SportID, &t.FormatID, &t.OrganizerID,
 			&t.RegDate, &t.StartDate, &t.EndDate, &t.Location, &t.Status, &t.MaxParticipants, &t.CreatedAt, &t.LogoKey,
+			&t.OverallWinnerParticipantID, // Added scan
 		); scanErr != nil {
 			return nil, scanErr
 		}
@@ -158,22 +174,25 @@ func (r *postgresTournamentRepository) List(ctx context.Context, filter ListTour
 }
 
 func (r *postgresTournamentRepository) Update(ctx context.Context, t *models.Tournament) error {
+	executor := r.getExecutor(nil)
+	// Assuming logo_key and overall_winner_participant_id are updated by their specific methods
 	query := `
 		UPDATE tournaments SET
 			name = $1,
 			description = $2,
 			sport_id = $3,
 			format_id = $4,
-			organizer_id = $5,
+			organizer_id = $5, 
 			reg_date = $6,
 			start_date = $7,
 			end_date = $8,
 			location = $9,
 			status = $10,
 			max_participants = $11
-		WHERE id = $12` // Assuming logo_key is updated separately or not in this general update
+			-- overall_winner_participant_id is NOT updated here by default
+		WHERE id = $12`
 
-	result, err := r.db.ExecContext(ctx, query,
+	result, err := executor.ExecContext(ctx, query,
 		t.Name, t.Description, t.SportID, t.FormatID, t.OrganizerID,
 		t.RegDate, t.StartDate, t.EndDate, t.Location, t.Status, t.MaxParticipants,
 		t.ID,
@@ -183,53 +202,66 @@ func (r *postgresTournamentRepository) Update(ctx context.Context, t *models.Tou
 		return r.handleTournamentError(err)
 	}
 
-	return checkAffectedRows(result, ErrTournamentNotFound) // Using shared helper
+	return checkAffectedRows(result, ErrTournamentNotFound)
 }
 
 func (r *postgresTournamentRepository) UpdateStatus(ctx context.Context, exec SQLExecutor, id int, status models.TournamentStatus) error {
+	executor := r.getExecutor(exec)
 	query := `UPDATE tournaments SET status = $1 WHERE id = $2`
-	result, err := exec.ExecContext(ctx, query, status, id)
+	result, err := executor.ExecContext(ctx, query, status, id)
 	if err != nil {
 		return r.handleTournamentError(err)
 	}
-	return checkAffectedRows(result, ErrTournamentNotFound) // Using shared helper
+	return checkAffectedRows(result, ErrTournamentNotFound)
 }
 
 func (r *postgresTournamentRepository) UpdateLogoKey(ctx context.Context, tournamentID int, logoKey *string) error {
+	executor := r.getExecutor(nil)
 	query := `UPDATE tournaments SET logo_key = $1 WHERE id = $2`
-	result, err := r.db.ExecContext(ctx, query, logoKey, tournamentID)
+	result, err := executor.ExecContext(ctx, query, logoKey, tournamentID)
 	if err != nil {
 		return fmt.Errorf("failed to update tournament logo key: %w", err)
 	}
-	return checkAffectedRows(result, ErrTournamentNotFound) // Using shared helper
+	return checkAffectedRows(result, ErrTournamentNotFound)
+}
+
+// UpdateOverallWinner sets or clears the overall winner of the tournament.
+func (r *postgresTournamentRepository) UpdateOverallWinner(ctx context.Context, exec SQLExecutor, tournamentID int, winnerParticipantID *int) error {
+	executor := r.getExecutor(exec)
+	query := `UPDATE tournaments SET overall_winner_participant_id = $1 WHERE id = $2`
+	result, err := executor.ExecContext(ctx, query, winnerParticipantID, tournamentID)
+	if err != nil {
+		// Check for foreign key violation if winnerParticipantID is invalid, though SET NULL FK should handle non-existent participants gracefully if that's desired.
+		// For now, a general error.
+		return fmt.Errorf("failed to update tournament overall winner for tournament %d: %w", tournamentID, err)
+	}
+	return checkAffectedRows(result, ErrTournamentNotFound)
 }
 
 func (r *postgresTournamentRepository) Delete(ctx context.Context, id int) error {
+	executor := r.getExecutor(nil)
 	query := `DELETE FROM tournaments WHERE id = $1`
-	result, err := r.db.ExecContext(ctx, query, id)
+	result, err := executor.ExecContext(ctx, query, id)
 	if err != nil {
 		return r.handleTournamentError(err)
 	}
-	return checkAffectedRows(result, ErrTournamentNotFound) // Using shared helper
+	return checkAffectedRows(result, ErrTournamentNotFound)
 }
 
-// GetTournamentsForAutoStatusUpdate fetches tournaments that might need a status update.
-// It considers tournaments not yet 'completed' or 'canceled'.
-// It checks:
-// - 'soon' tournaments if reg_date has passed.
-// - 'registration' tournaments if start_date has passed.
-// - 'active' tournaments if end_date has passed.
 func (r *postgresTournamentRepository) GetTournamentsForAutoStatusUpdate(ctx context.Context, exec SQLExecutor, currentTime time.Time) ([]*models.Tournament, error) {
+	executor := r.getExecutor(exec) // Use the passed executor
 	query := `
 		SELECT
 			id, name, description, sport_id, format_id, organizer_id,
-			reg_date, start_date, end_date, location, status, max_participants, created_at, logo_key
+			reg_date, start_date, end_date, location, status, max_participants, created_at, logo_key,
+			overall_winner_participant_id
 		FROM tournaments
-		WHERE status NOT IN ($1, $2) -- 'completed', 'canceled'
+		WHERE status NOT IN ($1, $2) 
 		AND (
-			(status = $3 AND reg_date <= $4) OR    -- 'soon' AND reg_date <= now
-			(status = $5 AND start_date <= $4) OR -- 'registration' AND start_date <= now
-			(status = $6 AND end_date <= $4)      -- 'active' AND end_date <= now
+			(status = $3 AND reg_date <= $4) OR    
+			(status = $5 AND start_date <= $4) OR 
+			(status = $6 AND end_date <= $4 AND overall_winner_participant_id IS NULL) -- Only move active to completed if no winner yet via this auto-process
+                                                                                   -- or remove overall_winner_participant_id IS NULL if EndDate strictly means completed regardless of winner.
 		)`
 	args := []interface{}{
 		models.StatusCompleted,    // $1
@@ -240,18 +272,19 @@ func (r *postgresTournamentRepository) GetTournamentsForAutoStatusUpdate(ctx con
 		models.StatusActive,       // $6
 	}
 
-	rows, err := exec.QueryContext(ctx, query, args...)
+	rows, err := executor.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query tournaments for auto status update: %w", err)
 	}
 	defer rows.Close()
 
-	tournaments := make([]*models.Tournament, 0)
+	var tournaments []*models.Tournament // Changed to slice of pointers
 	for rows.Next() {
 		var t models.Tournament
 		if scanErr := rows.Scan(
 			&t.ID, &t.Name, &t.Description, &t.SportID, &t.FormatID, &t.OrganizerID,
 			&t.RegDate, &t.StartDate, &t.EndDate, &t.Location, &t.Status, &t.MaxParticipants, &t.CreatedAt, &t.LogoKey,
+			&t.OverallWinnerParticipantID, // Added scan
 		); scanErr != nil {
 			return nil, fmt.Errorf("failed to scan tournament for auto status update: %w", scanErr)
 		}
@@ -269,11 +302,11 @@ func (r *postgresTournamentRepository) handleTournamentError(err error) error {
 	}
 	if pqErr, ok := err.(*pq.Error); ok {
 		switch pqErr.Code {
-		case "23505": // unique_violation
-			if pqErr.Constraint == "tournaments_organizer_id_name_key" { // Ensure this constraint exists for name uniqueness per organizer
+		case "23505":
+			if pqErr.Constraint == "tournaments_organizer_id_name_key" {
 				return ErrTournamentNameConflict
 			}
-		case "23503": // foreign_key_violation
+		case "23503":
 			switch pqErr.Constraint {
 			case "tournaments_sport_id_fkey":
 				return ErrTournamentInvalidSport
@@ -281,10 +314,14 @@ func (r *postgresTournamentRepository) handleTournamentError(err error) error {
 				return ErrTournamentInvalidFormat
 			case "tournaments_organizer_id_fkey":
 				return ErrTournamentInvalidOrg
+			case "fk_tournaments_overall_winner": // If a non-existent participant ID is used
+				return ErrParticipantNotFound // Or a more specific error like ErrWinnerParticipantInvalid
 			default:
 				// This case can cover FK violations from participants or matches tables pointing to tournaments,
-				// indicating the tournament is in use.
-				return ErrTournamentInUse
+				// indicating the tournament is in use when attempting to delete the tournament itself.
+				// It might also catch other FK issues if constraints are named differently.
+				// For creation/update, this FK part is less likely to be the primary error source from *this* table's operation itself.
+				return ErrTournamentInUse // Or a more generic FK violation error
 			}
 		}
 	}

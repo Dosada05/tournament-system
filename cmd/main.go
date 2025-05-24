@@ -23,13 +23,15 @@ import (
 	_ "github.com/lib/pq"
 )
 
-const schedulerInterval = 30 * time.Second // How often the scheduler runs
+const schedulerInterval = 30 * time.Second
 
+// @title Tournament System API
+// @version 0.0.1
+// @description This is a server for the tournament system.
+// @host localhost:8080
 func main() {
-	// Настройка логгера
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})) // Default to Info level
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	// Загрузка конфигурации
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("failed to load configuration", slog.Any("error", err))
@@ -37,7 +39,6 @@ func main() {
 	}
 	logger.Info("configuration loaded", slog.Int("port", cfg.ServerPort))
 
-	// Подключение к базе данных
 	dbConn, err := db.Connect(cfg.DatabaseURL, 5*time.Second)
 	if err != nil {
 		logger.Error("failed to connect to database", slog.Any("error", err))
@@ -52,7 +53,6 @@ func main() {
 	}()
 	logger.Info("database connection established")
 
-	// Инициализация загрузчика файлов (Cloudflare R2)
 	cloudflareUploader, err := storage.NewCloudflareR2Uploader(storage.CloudflareR2UploaderConfig{
 		AccountID:       cfg.R2AccountID,
 		AccessKeyID:     cfg.R2AccessKeyID,
@@ -71,7 +71,6 @@ func main() {
 	go wsHub.Run()
 	logger.Info("WebSocket Hub started")
 
-	// Инициализация репозиториев
 	userRepo := repositories.NewPostgresUserRepository(dbConn)
 	teamRepo := repositories.NewPostgresTeamRepository(dbConn)
 	sportRepo := repositories.NewPostgresSportRepository(dbConn)
@@ -81,9 +80,9 @@ func main() {
 	participantRepo := repositories.NewPostgresParticipantRepository(dbConn)
 	soloMatchRepo := repositories.NewPostgresSoloMatchRepository(dbConn)
 	teamMatchRepo := repositories.NewPostgresTeamMatchRepository(dbConn)
+	standingRepo := repositories.NewPostgresTournamentStandingRepository(dbConn) // Added
 	logger.Info("Repositories initialized")
 
-	// Инициализация сервисов
 	authService := services.NewAuthService(userRepo)
 	userService := services.NewUserService(userRepo, cloudflareUploader)
 	sportService := services.NewSportService(sportRepo, userRepo, cloudflareUploader)
@@ -91,20 +90,29 @@ func main() {
 	teamService := services.NewTeamService(teamRepo, userRepo, sportRepo, cloudflareUploader)
 	inviteService := services.NewInviteService(inviteRepo, teamRepo, userRepo)
 
-	// BracketService does not need dbConn directly if its methods requiring DB access get SQLExecutor
-	bracketService := services.NewBracketService(formatRepo, participantRepo, soloMatchRepo, teamMatchRepo)
+	bracketService := services.NewBracketService(
+		formatRepo,
+		participantRepo,
+		soloMatchRepo,
+		teamMatchRepo,
+		standingRepo, // Added
+		logger,       // Added
+	)
 
 	matchService := services.NewMatchService(
-		dbConn, // For its own transactions if needed
+		dbConn,
 		soloMatchRepo,
 		teamMatchRepo,
 		tournamentRepo,
 		participantRepo,
+		formatRepo,   // Added
+		standingRepo, // Added
 		wsHub,
+		logger, // Added
 	)
 
 	tournamentService := services.NewTournamentService(
-		dbConn, // Pass dbConn for transaction management
+		dbConn,
 		tournamentRepo,
 		sportRepo,
 		formatRepo,
@@ -112,6 +120,7 @@ func main() {
 		participantRepo,
 		soloMatchRepo,
 		teamMatchRepo,
+		standingRepo, // Added
 		bracketService,
 		matchService,
 		cloudflareUploader,
@@ -123,18 +132,15 @@ func main() {
 		tournamentRepo,
 		userRepo,
 		teamRepo,
-		formatRepo, // Pass formatRepo
+		formatRepo,
 		cloudflareUploader,
 	)
 	logger.Info("Services initialized")
 
-	// Запуск планировщика автоматического обновления статусов турниров
 	go func() {
 		ticker := time.NewTicker(schedulerInterval)
 		defer ticker.Stop()
 		logger.Info("Tournament status update scheduler started", slog.Duration("interval", schedulerInterval))
-
-		// Run once immediately at startup, then on ticker
 		if err := tournamentService.AutoUpdateTournamentStatusesByDates(context.Background()); err != nil {
 			logger.Error("Scheduler: initial run failed", slog.Any("error", err))
 		}
@@ -208,14 +214,12 @@ func main() {
 		}
 	case sig := <-quit:
 		logger.Info("shutdown signal received", slog.String("signal", sig.String()))
-		// Create a context with timeout for shutdown.
 		shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancelShutdown()
 
 		logger.Info("shutting down server", slog.Duration("timeout", 15*time.Second))
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			logger.Error("graceful shutdown failed", slog.Any("error", err))
-			// If shutdown fails, force close.
 			if closeErr := server.Close(); closeErr != nil {
 				logger.Error("failed to force close server", slog.Any("error", closeErr))
 			}

@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json" // Для UpdateFormatInput, если будем использовать json.RawMessage
 	"errors"
+	"github.com/Dosada05/tournament-system/models"
 	"github.com/Dosada05/tournament-system/services"
 	"log"
 	"net/http"
@@ -24,7 +25,7 @@ func NewFormatHandler(fs services.FormatService) *FormatHandler {
 // @Description Создает новый формат турнира. Доступно только администраторам.
 // @Accept json
 // @Produce json
-// @Param body body services.CreateFormatInput true "Данные для создания формата"
+// @Param body body services.CreateFormatInput true "Данные для создания формата (включая name, bracket_type, participant_type, settings_json)"
 // @Success 201 {object} map[string]interface{} "Формат создан"
 // @Failure 400 {object} map[string]string "Ошибка валидации"
 // @Failure 401 {object} map[string]string "Неавторизован"
@@ -35,17 +36,6 @@ func NewFormatHandler(fs services.FormatService) *FormatHandler {
 // @Router /formats [post]
 func (h *FormatHandler) CreateFormat(w http.ResponseWriter, r *http.Request) {
 	var input services.CreateFormatInput
-	// В models.Format у нас сейчас есть Name, BracketType, ParticipantType, SettingsJSON
-	// services.CreateFormatInput сейчас содержит только Name. Нужно будет его расширить.
-	// Пока оставим так, подразумевая, что CreateFormatInput в сервисе будет доработан.
-	// Для примера, предположим, что CreateFormatInput теперь выглядит так:
-	// type CreateFormatInput struct {
-	//    Name            string                 `json:"name" validate:"required"`
-	//    BracketType     string                 `json:"bracket_type" validate:"required"`
-	//    ParticipantType models.FormatParticipantType `json:"participant_type" validate:"required,oneof=solo team"`
-	//    SettingsJSON    *string                `json:"settings_json"` // Может быть nil
-	// }
-
 	if err := readJSON(w, r, &input); err != nil {
 		badRequestResponse(w, r, err)
 		return
@@ -57,7 +47,14 @@ func (h *FormatHandler) CreateFormat(w http.ResponseWriter, r *http.Request) {
 		badRequestResponse(w, r, errors.New("format name is required"))
 		return
 	}
-	// Добавьте валидацию для BracketType, ParticipantType, SettingsJSON, если они есть в CreateFormatInput
+	if input.BracketType == "" {
+		badRequestResponse(w, r, errors.New("format bracket_type is required"))
+		return
+	}
+	if input.ParticipantType == "" {
+		badRequestResponse(w, r, errors.New("format participant_type is required"))
+		return
+	}
 
 	format, err := h.formatService.CreateFormat(r.Context(), input)
 	if err != nil {
@@ -65,7 +62,34 @@ func (h *FormatHandler) CreateFormat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := writeJSON(w, http.StatusCreated, jsonResponse{"format": format}, nil); err != nil {
+	// Для ответа клиенту, можно сразу распарсить settings, если они есть
+	var responseSettings interface{}
+	if format.SettingsJSON != nil && *format.SettingsJSON != "" {
+		if format.BracketType == "RoundRobin" {
+			var rrSettings models.RoundRobinSettings
+			if errJson := json.Unmarshal([]byte(*format.SettingsJSON), &rrSettings); errJson == nil {
+				responseSettings = rrSettings
+			} else {
+				log.Printf("Warning: could not unmarshal RoundRobinSettings for created format %d: %v", format.ID, errJson)
+				// Можно вернуть settings_json как строку или пустой объект
+				_ = json.Unmarshal([]byte(*format.SettingsJSON), &responseSettings) // Попытка как generic map
+			}
+		} else {
+			// Для других типов просто пытаемся анмаршалить в map[string]interface{}
+			_ = json.Unmarshal([]byte(*format.SettingsJSON), &responseSettings)
+		}
+	}
+
+	responsePayload := map[string]interface{}{
+		"id":               format.ID,
+		"name":             format.Name,
+		"bracket_type":     format.BracketType,
+		"participant_type": format.ParticipantType,
+		"settings_json":    format.SettingsJSON, // Можно вернуть и сырой JSON
+		"parsed_settings":  responseSettings,    // И распарсенные настройки
+	}
+
+	if err := writeJSON(w, http.StatusCreated, jsonResponse{"format": responsePayload}, nil); err != nil {
 		serverErrorResponse(w, r, err)
 	}
 }
@@ -81,7 +105,7 @@ func (h *FormatHandler) CreateFormat(w http.ResponseWriter, r *http.Request) {
 // @Failure 404 {object} map[string]string "Формат не найден"
 // @Router /formats/{formatID} [get]
 func (h *FormatHandler) GetFormatByID(w http.ResponseWriter, r *http.Request) {
-	formatID, err := getIDFromURL(r, "formatID") // Используем getIDFromURL из team_handler.go или helpers.go
+	formatID, err := getIDFromURL(r, "formatID")
 	if err != nil {
 		badRequestResponse(w, r, err)
 		return
@@ -93,12 +117,19 @@ func (h *FormatHandler) GetFormatByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Размаршаливаем SettingsJSON, если он есть, для ответа клиенту
-	var settings map[string]interface{}
+	var responseSettings interface{}
 	if format.SettingsJSON != nil && *format.SettingsJSON != "" {
-		if errJson := json.Unmarshal([]byte(*format.SettingsJSON), &settings); errJson != nil {
-			// Логируем ошибку, но продолжаем, возможно, JSON некорректен в БД
-			log.Printf("Warning: could not unmarshal SettingsJSON for format %d: %v", format.ID, errJson)
+		if format.BracketType == "RoundRobin" {
+			// Используем GetRoundRobinSettings из модели
+			rrSettings, rrErr := format.GetRoundRobinSettings()
+			if rrErr == nil && rrSettings != nil {
+				responseSettings = rrSettings
+			} else if rrErr != nil {
+				log.Printf("Warning: could not parse RoundRobinSettings for format %d on get: %v", format.ID, rrErr)
+				_ = json.Unmarshal([]byte(*format.SettingsJSON), &responseSettings) // Fallback
+			}
+		} else {
+			_ = json.Unmarshal([]byte(*format.SettingsJSON), &responseSettings) // Fallback for other types
 		}
 	}
 
@@ -107,8 +138,8 @@ func (h *FormatHandler) GetFormatByID(w http.ResponseWriter, r *http.Request) {
 		"name":             format.Name,
 		"bracket_type":     format.BracketType,
 		"participant_type": format.ParticipantType,
-		// SettingsJSON не отдаем в сыром виде, если не нужно. Отдаем settings.
-		"settings": settings, // Будет null, если JSON пустой или невалидный
+		"settings_json":    format.SettingsJSON, // Можно вернуть и сырой JSON
+		"parsed_settings":  responseSettings,    // И распарсенные настройки
 	}
 
 	if err := writeJSON(w, http.StatusOK, jsonResponse{"format": responsePayload}, nil); err != nil {
@@ -119,9 +150,9 @@ func (h *FormatHandler) GetFormatByID(w http.ResponseWriter, r *http.Request) {
 // GetAllFormats godoc
 // @Summary Получить все форматы
 // @Tags formats
-// @Description Возвращает список всех доступных форматов турниров.
+// @Description Возвращает список всех доступных форматов турниров, включая распарсенные настройки.
 // @Produce json
-// @Success 200 {object} map[string]interface{} "Список форматов"
+// @Success 200 {object} map[string]interface{} "Список форматов (каждый включая 'parsed_settings')"
 // @Failure 500 {object} map[string]string "Внутренняя ошибка сервера"
 // @Router /formats [get]
 func (h *FormatHandler) GetAllFormats(w http.ResponseWriter, r *http.Request) {
@@ -131,19 +162,29 @@ func (h *FormatHandler) GetAllFormats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Для каждого формата можно также размаршалить SettingsJSON, если нужно их показывать в списке
 	responseFormats := make([]map[string]interface{}, len(formats))
 	for i, f := range formats {
-		var settings map[string]interface{}
+		var parsedSettings interface{}
 		if f.SettingsJSON != nil && *f.SettingsJSON != "" {
-			_ = json.Unmarshal([]byte(*f.SettingsJSON), &settings) // Ошибку здесь можно проигнорировать для списка
+			if f.BracketType == "RoundRobin" {
+				rrSettings, rrErr := f.GetRoundRobinSettings()
+				if rrErr == nil && rrSettings != nil {
+					parsedSettings = rrSettings
+				} else if rrErr != nil {
+					log.Printf("Warning: could not parse RoundRobinSettings for format %d in list: %v", f.ID, rrErr)
+					_ = json.Unmarshal([]byte(*f.SettingsJSON), &parsedSettings)
+				}
+			} else {
+				_ = json.Unmarshal([]byte(*f.SettingsJSON), &parsedSettings)
+			}
 		}
 		responseFormats[i] = map[string]interface{}{
 			"id":               f.ID,
 			"name":             f.Name,
 			"bracket_type":     f.BracketType,
 			"participant_type": f.ParticipantType,
-			"settings":         settings,
+			"settings_json":    f.SettingsJSON,
+			"parsed_settings":  parsedSettings,
 		}
 	}
 
@@ -159,8 +200,8 @@ func (h *FormatHandler) GetAllFormats(w http.ResponseWriter, r *http.Request) {
 // @Accept json
 // @Produce json
 // @Param formatID path int true "Format ID"
-// @Param body body services.UpdateFormatInput true "Данные для обновления формата"
-// @Success 200 {object} map[string]interface{} "Формат обновлен"
+// @Param body body services.UpdateFormatInput true "Данные для обновления формата (поля опциональны)"
+// @Success 200 {object} map[string]interface{} "Формат обновлен (включая 'parsed_settings')"
 // @Failure 400 {object} map[string]string "Ошибка валидации или некорректный ID"
 // @Failure 401 {object} map[string]string "Неавторизован"
 // @Failure 403 {object} map[string]string "Нет прав (не админ)"
@@ -177,26 +218,16 @@ func (h *FormatHandler) UpdateFormat(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var input services.UpdateFormatInput
-	// Аналогично Create, UpdateFormatInput в сервисе нужно будет расширить
-	// для поддержки всех изменяемых полей: Name, BracketType, ParticipantType, SettingsJSON.
-	// type UpdateFormatInput struct {
-	//    Name            *string                `json:"name"`
-	//    BracketType     *string                `json:"bracket_type"`
-	//    ParticipantType *models.FormatParticipantType `json:"participant_type"`
-	//    SettingsJSON    *string                `json:"settings_json"` // Может быть строка "null" для удаления, или json-строка
-	// }
-
 	if err := readJSON(w, r, &input); err != nil {
 		badRequestResponse(w, r, err)
 		return
 	}
 
-	// Валидация: хотя бы одно поле должно быть для обновления
-	// (эта логика должна быть в сервисе или здесь, если input содержит указатели)
-	// if input.Name == nil && input.BracketType == nil && input.ParticipantType == nil && input.SettingsJSON == nil {
-	// 	badRequestResponse(w, r, errors.New("at least one field must be provided for update"))
-	// 	return
-	// }
+	// Проверка, что хотя бы одно поле передано (если все поля в UpdateFormatInput - указатели)
+	if input.Name == nil && input.BracketType == nil && input.ParticipantType == nil && input.SettingsJSON == nil {
+		badRequestResponse(w, r, errors.New("at least one field must be provided for update"))
+		return
+	}
 
 	updatedFormat, err := h.formatService.UpdateFormat(r.Context(), formatID, input)
 	if err != nil {
@@ -204,7 +235,30 @@ func (h *FormatHandler) UpdateFormat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := writeJSON(w, http.StatusOK, jsonResponse{"format": updatedFormat}, nil); err != nil {
+	var responseSettings interface{}
+	if updatedFormat.SettingsJSON != nil && *updatedFormat.SettingsJSON != "" {
+		if updatedFormat.BracketType == "RoundRobin" {
+			rrSettings, rrErr := updatedFormat.GetRoundRobinSettings()
+			if rrErr == nil && rrSettings != nil {
+				responseSettings = rrSettings
+			} else if rrErr != nil {
+				log.Printf("Warning: could not parse RoundRobinSettings for updated format %d: %v", updatedFormat.ID, rrErr)
+				_ = json.Unmarshal([]byte(*updatedFormat.SettingsJSON), &responseSettings)
+			}
+		} else {
+			_ = json.Unmarshal([]byte(*updatedFormat.SettingsJSON), &responseSettings)
+		}
+	}
+	responsePayload := map[string]interface{}{
+		"id":               updatedFormat.ID,
+		"name":             updatedFormat.Name,
+		"bracket_type":     updatedFormat.BracketType,
+		"participant_type": updatedFormat.ParticipantType,
+		"settings_json":    updatedFormat.SettingsJSON,
+		"parsed_settings":  responseSettings,
+	}
+
+	if err := writeJSON(w, http.StatusOK, jsonResponse{"format": responsePayload}, nil); err != nil {
 		serverErrorResponse(w, r, err)
 	}
 }
@@ -239,9 +293,3 @@ func (h *FormatHandler) DeleteFormat(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusNoContent)
 }
-
-// getIDFromURL - вспомогательная функция для извлечения ID из URL.
-// Если у вас уже есть такая в общем файле helpers.go, используйте ее.
-// Если нет, можно скопировать из team_handler.go или определить здесь.
-// Для примера, я предполагаю, что она будет доступна (например, из helpers.go, который уже используется другими хендлерами).
-// func getIDFromURL(r *http.Request, paramName string) (int, error) { ... }

@@ -2,25 +2,53 @@
 package services
 
 import (
-	"context" // Нужен для populateTournamentDetails, если он останется здесь
+	"context"
 	"fmt"
-	"log/slog" // Для функций, которые могут логировать
+	"log/slog"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/Dosada05/tournament-system/models"
-	"github.com/Dosada05/tournament-system/repositories" // Нужен для handleRepositoryError
-	"github.com/Dosada05/tournament-system/storage"      // Нужен для populate... функций
+	"github.com/Dosada05/tournament-system/repositories"
+	"github.com/Dosada05/tournament-system/storage"
 )
-
-// --- Общие хелперы ---
 
 func derefString(s *string) string {
 	if s == nil {
 		return ""
 	}
 	return *s
+}
+
+func (s *tournamentService) withTransaction(ctx context.Context, fn func(tx repositories.SQLExecutor) error) error {
+	dbTx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		s.logger.ErrorContext(ctx, "Failed to begin transaction", slog.Any("error", err))
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	var opErr error
+	defer func() {
+		if p := recover(); p != nil {
+			s.logger.ErrorContext(ctx, "Recovered from panic in transaction", slog.Any("panic_value", p))
+			_ = dbTx.Rollback()
+			panic(p)
+		} else if opErr != nil {
+			s.logger.ErrorContext(ctx, "Transaction error, rolling back", slog.Any("operation_error", opErr))
+			if rbErr := dbTx.Rollback(); rbErr != nil {
+				s.logger.ErrorContext(ctx, "Transaction rollback failed", slog.Any("rollback_error", rbErr))
+			}
+		} else {
+			if cErr := dbTx.Commit(); cErr != nil {
+				s.logger.ErrorContext(ctx, "Failed to commit transaction", slog.Any("commit_error", cErr))
+				opErr = fmt.Errorf("failed to commit transaction: %w", cErr)
+			} else {
+				s.logger.DebugContext(ctx, "Transaction committed successfully")
+			}
+		}
+	}()
+	opErr = fn(dbTx)
+	return opErr
 }
 
 func validateTournamentDates(reg, start, end time.Time) error {

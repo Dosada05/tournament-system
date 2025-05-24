@@ -30,4 +30,14 @@ ALTER TABLE formats
     DROP COLUMN participant_type,
     DROP COLUMN bracket_type;
 
+DROP TRIGGER IF EXISTS update_tournament_standings_updated_at ON tournament_standings;
+DROP FUNCTION IF EXISTS update_standings_updated_at_column();
+DROP TABLE IF EXISTS tournament_standings CASCADE;
+
+ALTER TABLE tournaments DROP CONSTRAINT IF EXISTS tournaments_organizer_id_name_key;
+
+ALTER TABLE tournaments DROP CONSTRAINT IF EXISTS fk_tournaments_overall_winner;
+ALTER TABLE tournaments DROP COLUMN IF EXISTS overall_winner_participant_id;
+
+
 -- +migrate StatementEnd
