@@ -48,4 +48,5 @@ var (
 	ErrTournamentInvalidCapacity         = errors.New("tournament max participants must be positive")
 	ErrTournamentInvalidStatus           = errors.New("invalid tournament status provided")
 	ErrTournamentInvalidStatusTransition = errors.New("invalid tournament status transition")
+	ErrOrganizerCannotParticipate        = errors.New("tournament organizer cannot participate in their own tournament")
 )

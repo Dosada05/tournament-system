@@ -125,15 +125,15 @@ func SetupRoutes(
 			authRouter.Use(middleware.Authenticate)
 			authRouter.Post("/", tournamentHandler.CreateHandler)
 			authRouter.Put("/{tournamentID}", tournamentHandler.UpdateDetailsHandler)
-			authRouter.Patch("/{tournamentID}/status", tournamentHandler.UpdateStatusHandler)
-			authRouter.Delete("/{tournamentID}", tournamentHandler.DeleteHandler)
-			authRouter.Post("/{tournamentID}/logo", tournamentHandler.UploadTournamentLogoHandler)
+			authRouter.With(middleware.Authorize(models.RoleOrganizer, models.RoleAdmin)).Patch("/{tournamentID}/status", tournamentHandler.UpdateStatusHandler)
+			authRouter.With(middleware.Authorize(models.RoleOrganizer, models.RoleAdmin)).Delete("/{tournamentID}", tournamentHandler.DeleteHandler)
+			authRouter.With(middleware.Authorize(models.RoleOrganizer, models.RoleAdmin)).Post("/{tournamentID}/logo", tournamentHandler.UploadTournamentLogoHandler)
 
 			authRouter.Post("/{tournamentID}/register/solo", participantHandler.RegisterSolo)
 			authRouter.Post("/{tournamentID}/register/team", participantHandler.RegisterTeam)
 
-			authRouter.Patch("/{tournamentID}/matches/solo/{matchID}/result", tournamentHandler.UpdateSoloMatchResultHandler)
-			authRouter.Patch("/{tournamentID}/matches/team/{matchID}/result", tournamentHandler.UpdateTeamMatchResultHandler)
+			authRouter.With(middleware.Authorize(models.RoleOrganizer, models.RoleAdmin)).Patch("/{tournamentID}/matches/solo/{matchID}/result", tournamentHandler.UpdateSoloMatchResultHandler)
+			authRouter.With(middleware.Authorize(models.RoleOrganizer, models.RoleAdmin)).Patch("/{tournamentID}/matches/team/{matchID}/result", tournamentHandler.UpdateTeamMatchResultHandler)
 		})
 	})
 
@@ -143,9 +143,9 @@ func SetupRoutes(
 		// Отмена своей регистрации (пользователь/капитан)
 		r.Delete("/cancel", participantHandler.CancelRegistration)
 		// Управление заявками (для организатора турнира - можно добавить Authorize)
-		r.Patch("/status", participantHandler.UpdateApplicationStatus)
+		r.With(middleware.Authorize(models.RoleOrganizer, models.RoleAdmin)).Patch("/status", participantHandler.UpdateApplicationStatus)
 	})
 
-	router.Get("/ws/tournaments/{tournamentID}", webSocketHandler.ServeWs)
+	router.With(middleware.Authenticate).Get("/ws/tournaments/{tournamentID}", webSocketHandler.ServeWs)
 
 }
