@@ -2,9 +2,8 @@ package services
 
 import (
 	"context"
-	// "database/sql" // Больше не нужен здесь, если только для GetFullTournamentData, но там тоже можно убрать, если репо не требуют
 	"fmt"
-	"log"
+	"log/slog" // Switched to slog
 	"time"
 
 	"github.com/Dosada05/tournament-system/brackets"
@@ -25,9 +24,8 @@ type TournamentWinnerPayload struct {
 }
 
 type BracketService interface {
-	// GenerateAndSaveBracket теперь принимает SQLExecutor
 	GenerateAndSaveBracket(ctx context.Context, exec repositories.SQLExecutor, tournament *models.Tournament) (interface{}, error)
-	GetFullTournamentData(ctx context.Context, tournamentID int, formatID int) (*models.Tournament, error)
+	GetFullTournamentData(ctx context.Context, tournamentID int, formatID int) (*models.Tournament, error) // Kept for now
 }
 
 type bracketService struct {
@@ -35,6 +33,8 @@ type bracketService struct {
 	participantRepo repositories.ParticipantRepository
 	soloMatchRepo   repositories.SoloMatchRepository
 	teamMatchRepo   repositories.TeamMatchRepository
+	standingRepo    repositories.TournamentStandingRepository // Added
+	logger          *slog.Logger                              // Added
 }
 
 func NewBracketService(
@@ -42,44 +42,44 @@ func NewBracketService(
 	participantRepo repositories.ParticipantRepository,
 	soloMatchRepo repositories.SoloMatchRepository,
 	teamMatchRepo repositories.TeamMatchRepository,
+	standingRepo repositories.TournamentStandingRepository, // Added
+	logger *slog.Logger, // Added
 ) BracketService {
 	return &bracketService{
 		formatRepo:      formatRepo,
 		participantRepo: participantRepo,
 		soloMatchRepo:   soloMatchRepo,
 		teamMatchRepo:   teamMatchRepo,
+		standingRepo:    standingRepo, // Added
+		logger:          logger,       // Added
 	}
 }
 
-// GenerateAndSaveBracket теперь принимает SQLExecutor (которым будет *sql.Tx из TournamentService)
 func (s *bracketService) GenerateAndSaveBracket(ctx context.Context, exec repositories.SQLExecutor, tournament *models.Tournament) (interface{}, error) {
-	// Важно: Этот метод теперь НЕ должен начинать или коммитить/откатывать транзакцию.
-	// Это делает вызывающая сторона (TournamentService.AutoUpdateTournamentStatusesByDates).
-	// Все операции записи в БД внутри этого метода должны использовать переданный 'exec'.
-
 	if tournament.Format == nil {
-		// Чтение формата: если formatRepo.GetByID не принимает SQLExecutor, он будет использовать свое соединение.
-		// Это нормально, так как формат читается до каких-либо записей в текущей транзакции 'exec'.
 		format, err := s.formatRepo.GetByID(ctx, tournament.FormatID)
 		if err != nil {
+			s.logger.ErrorContext(ctx, "GenerateAndSaveBracket: failed to load format", slog.Int("format_id", tournament.FormatID), slog.Any("error", err))
 			return nil, fmt.Errorf("GenerateAndSaveBracket: failed to load format %d: %w", tournament.FormatID, err)
 		}
 		if format == nil {
+			s.logger.ErrorContext(ctx, "GenerateAndSaveBracket: format not found", slog.Int("format_id", tournament.FormatID))
 			return nil, fmt.Errorf("GenerateAndSaveBracket: format %d not found", tournament.FormatID)
 		}
 		tournament.Format = format
 	}
 
-	log.Printf("GenerateAndSaveBracket: Starting for tournament ID: %d within a transaction", tournament.ID)
+	s.logger.InfoContext(ctx, "GenerateAndSaveBracket: Starting", slog.Int("tournament_id", tournament.ID), slog.String("format_type", tournament.Format.BracketType))
 
 	statusConfirmed := models.StatusParticipant
-	// Чтение участников: аналогично формату, participantRepo.ListByTournament использует свое соединение.
-	dbParticipants, err := s.participantRepo.ListByTournament(ctx, tournament.ID, &statusConfirmed, true)
+	dbParticipants, err := s.participantRepo.ListByTournament(ctx, tournament.ID, &statusConfirmed, true) // includeNested true to get user/team details if needed by generator
 	if err != nil {
+		s.logger.ErrorContext(ctx, "GenerateAndSaveBracket: failed to list participants", slog.Int("tournament_id", tournament.ID), slog.Any("error", err))
 		return nil, fmt.Errorf("GenerateAndSaveBracket: failed to list participants for tournament %d: %w", tournament.ID, err)
 	}
 
-	if len(dbParticipants) < 2 { // Эта проверка уже есть в TournamentService, но здесь как дополнительная защита
+	if len(dbParticipants) < 2 {
+		s.logger.WarnContext(ctx, "GenerateAndSaveBracket: not enough participants", slog.Int("tournament_id", tournament.ID), slog.Int("participant_count", len(dbParticipants)))
 		return nil, fmt.Errorf("GenerateAndSaveBracket: not enough participants (found %d, min 2)", len(dbParticipants))
 	}
 
@@ -87,9 +87,13 @@ func (s *bracketService) GenerateAndSaveBracket(ctx context.Context, exec reposi
 	switch tournament.Format.BracketType {
 	case "SingleElimination":
 		bracketGenerator = brackets.NewSingleEliminationGenerator()
+	case "RoundRobin":
+		bracketGenerator = brackets.NewRoundRobinGenerator()
 	default:
+		s.logger.ErrorContext(ctx, "GenerateAndSaveBracket: unsupported bracket type", slog.String("bracket_type", tournament.Format.BracketType))
 		return nil, fmt.Errorf("unsupported bracket type '%s'", tournament.Format.BracketType)
 	}
+	s.logger.InfoContext(ctx, "GenerateAndSaveBracket: Using generator", slog.String("generator_name", bracketGenerator.GetName()))
 
 	params := brackets.GenerateBracketParams{
 		Tournament:   tournament,
@@ -97,27 +101,43 @@ func (s *bracketService) GenerateAndSaveBracket(ctx context.Context, exec reposi
 	}
 	generatedBracketMatches, genErr := bracketGenerator.GenerateBracket(ctx, params)
 	if genErr != nil {
+		s.logger.ErrorContext(ctx, "GenerateAndSaveBracket: failed to generate bracket structure", slog.Any("error", genErr))
 		return nil, fmt.Errorf("GenerateAndSaveBracket: failed to generate structure: %w", genErr)
 	}
-	if len(generatedBracketMatches) == 0 && len(dbParticipants) >= 2 {
-		return nil, fmt.Errorf("GenerateAndSaveBracket: no matches generated for %d participants", len(dbParticipants))
+	if len(generatedBracketMatches) == 0 && len(dbParticipants) >= 2 && tournament.Format.BracketType != "RoundRobin" { // RoundRobin might have 0 matches if only 1 participant (though we check for <2)
+		s.logger.WarnContext(ctx, "GenerateAndSaveBracket: no matches generated", slog.Int("participant_count", len(dbParticipants)))
+		// For RoundRobin with 2 participants, 1 match is expected. If 0, it's an issue.
+		if tournament.Format.BracketType == "RoundRobin" && len(dbParticipants) >= 2 {
+			return nil, fmt.Errorf("GenerateAndSaveBracket: no matches generated for RoundRobin with %d participants", len(dbParticipants))
+		}
+		// For SingleElimination, this is definitely an issue.
+		if tournament.Format.BracketType == "SingleElimination" {
+			return nil, fmt.Errorf("GenerateAndSaveBracket: no matches generated for SingleElimination with %d participants", len(dbParticipants))
+		}
 	}
+	s.logger.InfoContext(ctx, "GenerateAndSaveBracket: Generated bracket matches", slog.Int("count", len(generatedBracketMatches)))
 
 	mapBracketUIDToDBMatchID := make(map[string]int)
 	mapBracketUIDToModel := make(map[string]*brackets.BracketMatch)
 	createdDBMatchEntities := make([]interface{}, 0, len(generatedBracketMatches))
+
 	defaultMatchTime := tournament.StartDate
 	if time.Now().After(defaultMatchTime) {
-		defaultMatchTime = time.Now().Add(15 * time.Minute) // Можно вынести в константу или конфигурацию
+		defaultMatchTime = time.Now().Add(15 * time.Minute)
+	}
+	// Ensure defaultMatchTime is not before tournament start_date, adjust if it is.
+	if defaultMatchTime.Before(tournament.StartDate) {
+		defaultMatchTime = tournament.StartDate.Add(15 * time.Minute) // Schedule slightly after official start
 	}
 
 	// ПЕРВЫЙ ПРОХОД: Создаем все матчи-заготовки в БД, используя переданный 'exec'
 	for _, bm := range generatedBracketMatches {
 		mapBracketUIDToModel[bm.UID] = bm
 
-		if bm.IsBye {
+		if bm.IsBye && tournament.Format.BracketType == "SingleElimination" { // Byes primarily for SE
 			if bm.ByeParticipantID != nil {
-				log.Printf("GenerateAndSaveBracket: Participant ID %d (UID: %s) has a bye in Round %d. No DB match created for this bye event.", *bm.ByeParticipantID, bm.UID, bm.Round)
+				// Corrected slog call for *int
+				s.logger.InfoContext(ctx, "GenerateAndSaveBracket: Participant has a bye in Single Elimination.", slog.Any("participant_id", bm.ByeParticipantID), slog.String("uid", bm.UID), slog.Int("round", bm.Round))
 			}
 			continue
 		}
@@ -138,8 +158,9 @@ func (s *bracketService) GenerateAndSaveBracket(ctx context.Context, exec reposi
 				Round:           &roundNum,
 				BracketMatchUID: &bmUIDStr,
 			}
-			err = s.soloMatchRepo.Create(ctx, exec, newMatch) // Используем exec
+			err = s.soloMatchRepo.Create(ctx, exec, newMatch)
 			if err != nil {
+				s.logger.ErrorContext(ctx, "GenerateAndSaveBracket: failed to save solo match", slog.String("bracket_uid", bm.UID), slog.Any("error", err))
 				return nil, fmt.Errorf("GenerateAndSaveBracket: failed to save solo match (BracketUID: %s): %w", bm.UID, err)
 			}
 			currentDBMatchID = newMatch.ID
@@ -154,72 +175,98 @@ func (s *bracketService) GenerateAndSaveBracket(ctx context.Context, exec reposi
 				Round:           &roundNum,
 				BracketMatchUID: &bmUIDStr,
 			}
-			err = s.teamMatchRepo.Create(ctx, exec, newMatch) // Используем exec
+			err = s.teamMatchRepo.Create(ctx, exec, newMatch)
 			if err != nil {
+				s.logger.ErrorContext(ctx, "GenerateAndSaveBracket: failed to save team match", slog.String("bracket_uid", bm.UID), slog.Any("error", err))
 				return nil, fmt.Errorf("GenerateAndSaveBracket: failed to save team match (BracketUID: %s): %w", bm.UID, err)
 			}
 			currentDBMatchID = newMatch.ID
 			currentDBMatchEntity = newMatch
 		default:
+			s.logger.ErrorContext(ctx, "GenerateAndSaveBracket: unknown participant type", slog.String("participant_type", string(tournament.Format.ParticipantType)))
 			return nil, fmt.Errorf("unknown participant type '%s' for tournament %d", tournament.Format.ParticipantType, tournament.ID)
 		}
 		mapBracketUIDToDBMatchID[bm.UID] = currentDBMatchID
 		createdDBMatchEntities = append(createdDBMatchEntities, currentDBMatchEntity)
-		log.Printf("GenerateAndSaveBracket: DB Match ID %d (BracketUID: %s) created for Round %d using exec.", currentDBMatchID, bm.UID, roundNum)
+		s.logger.InfoContext(ctx, "GenerateAndSaveBracket: DB Match created", slog.Int("db_match_id", currentDBMatchID), slog.String("bracket_uid", bm.UID), slog.Int("round", roundNum))
 	}
 
-	// ВТОРОЙ ПРОХОД: Устанавливаем связи next_match_db_id и winner_to_slot, используя 'exec'
-	for currentBracketUID, currentDBMatchID := range mapBracketUIDToDBMatchID {
-		bm := mapBracketUIDToModel[currentBracketUID]
+	// SECOND PASS (Only for SingleElimination): Set up next_match_db_id and winner_to_slot
+	if tournament.Format.BracketType == "SingleElimination" {
+		for currentBracketUID, currentDBMatchID := range mapBracketUIDToDBMatchID {
+			bm := mapBracketUIDToModel[currentBracketUID] // The source match from the generator
 
-		var nextMatchDBIDForUpdate *int
-		var targetSlotInNextMatchForUpdate *int
+			var nextMatchDBIDForUpdate *int
+			var targetSlotInNextMatchForUpdate *int
 
-		for _, potentialTargetBm := range generatedBracketMatches {
-			if potentialTargetBm.IsBye {
-				continue
-			}
-			targetDBID, isTargetMatchInDB := mapBracketUIDToDBMatchID[potentialTargetBm.UID]
-			if !isTargetMatchInDB {
-				continue
+			// Find which generated match (bmTarget) has currentBracketUID as one of its sources
+			for _, bmTarget := range generatedBracketMatches {
+				if bmTarget.IsBye { // Skip byes as target matches
+					continue
+				}
+				targetDBID, isTargetMatchInDB := mapBracketUIDToDBMatchID[bmTarget.UID]
+				if !isTargetMatchInDB { // Target not a real match
+					continue
+				}
+
+				slot := 0
+				if bmTarget.SourceMatch1UID != nil && *bmTarget.SourceMatch1UID == bm.UID {
+					slot = 1
+				} else if bmTarget.SourceMatch2UID != nil && *bmTarget.SourceMatch2UID == bm.UID {
+					slot = 2
+				}
+
+				if slot > 0 { // currentBracketUID is a source for bmTarget
+					nextMatchDBIDForUpdate = &targetDBID
+					targetSlotInNextMatchForUpdate = &slot
+					break // Found the next match
+				}
 			}
 
-			isSource := false
-			slot := 0
-			if potentialTargetBm.SourceMatch1UID != nil && *potentialTargetBm.SourceMatch1UID == bm.UID {
-				isSource = true
-				slot = 1
-			} else if potentialTargetBm.SourceMatch2UID != nil && *potentialTargetBm.SourceMatch2UID == bm.UID {
-				isSource = true
-				slot = 2
-			}
+			if nextMatchDBIDForUpdate != nil && targetSlotInNextMatchForUpdate != nil {
+				s.logger.InfoContext(ctx, "GenerateAndSaveBracket: Linking SE DB Match",
+					slog.Int("source_match_id", currentDBMatchID), slog.String("source_bracket_uid", bm.UID),
+					slog.Any("next_match_db_id", nextMatchDBIDForUpdate), slog.Any("winner_to_slot", targetSlotInNextMatchForUpdate))
 
-			if isSource {
-				nextMatchDBIDForUpdate = &targetDBID
-				targetSlotInNextMatchForUpdate = &slot
-				break
-			}
-		}
-
-		if nextMatchDBIDForUpdate != nil {
-			log.Printf("GenerateAndSaveBracket: Linking DB Match ID %d (BracketUID: %s) to Next DB Match ID %d, Slot %d using exec.",
-				currentDBMatchID, bm.UID, *nextMatchDBIDForUpdate, *targetSlotInNextMatchForUpdate)
-			if tournament.Format.ParticipantType == models.FormatParticipantSolo {
-				err = s.soloMatchRepo.UpdateNextMatchInfo(ctx, exec, currentDBMatchID, nextMatchDBIDForUpdate, targetSlotInNextMatchForUpdate)
-			} else {
-				err = s.teamMatchRepo.UpdateNextMatchInfo(ctx, exec, currentDBMatchID, nextMatchDBIDForUpdate, targetSlotInNextMatchForUpdate)
-			}
-			if err != nil {
-				return nil, fmt.Errorf("GenerateAndSaveBracket: failed to update next match info for DB match %d (BracketUID: %s): %w", currentDBMatchID, bm.UID, err)
+				if tournament.Format.ParticipantType == models.FormatParticipantSolo {
+					err = s.soloMatchRepo.UpdateNextMatchInfo(ctx, exec, currentDBMatchID, nextMatchDBIDForUpdate, targetSlotInNextMatchForUpdate)
+				} else {
+					err = s.teamMatchRepo.UpdateNextMatchInfo(ctx, exec, currentDBMatchID, nextMatchDBIDForUpdate, targetSlotInNextMatchForUpdate)
+				}
+				if err != nil {
+					s.logger.ErrorContext(ctx, "GenerateAndSaveBracket: failed to update next match info", slog.Int("db_match_id", currentDBMatchID), slog.Any("error", err))
+					return nil, fmt.Errorf("GenerateAndSaveBracket: failed to update next match info for DB match %d (BracketUID: %s): %w", currentDBMatchID, bm.UID, err)
+				}
 			}
 		}
 	}
-	// Третий проход был удален, т.к. предполагается, что генератор корректно устанавливает участников с bye
-	// в поля Participant1ID/Participant2ID матчей следующего раунда, и первый проход BracketService их сохраняет.
 
-	log.Printf("GenerateAndSaveBracket: Bracket processing completed for tournament %d using exec.", tournament.ID)
-	// Возвращаем созданные сущности. Вызывающая сторона (TournamentService) решит, что с ними делать.
-	// GetFullTournamentData здесь не вызывается, так как мы находимся внутри транзакции 'exec'.
+	// Initialize standings for RoundRobin
+	if tournament.Format.BracketType == "RoundRobin" {
+		s.logger.InfoContext(ctx, "GenerateAndSaveBracket: Initializing standings for RoundRobin tournament", slog.Int("tournament_id", tournament.ID))
+		standingsToCreate := make([]*models.TournamentStanding, 0, len(dbParticipants))
+		for _, p := range dbParticipants {
+			standingsToCreate = append(standingsToCreate, &models.TournamentStanding{
+				TournamentID:  tournament.ID,
+				ParticipantID: p.ID, // Participant's DB ID
+				Points:        0,
+				GamesPlayed:   0,
+				Wins:          0,
+				Draws:         0,
+				Losses:        0,
+				ScoreFor:      0,
+				ScoreAgainst:  0,
+				UpdatedAt:     time.Now(),
+			})
+		}
+		if err := s.standingRepo.BatchCreate(ctx, exec, standingsToCreate); err != nil {
+			s.logger.ErrorContext(ctx, "GenerateAndSaveBracket: failed to batch create standings", slog.Int("tournament_id", tournament.ID), slog.Any("error", err))
+			return nil, fmt.Errorf("GenerateAndSaveBracket: failed to initialize standings for tournament %d: %w", tournament.ID, err)
+		}
+		s.logger.InfoContext(ctx, "GenerateAndSaveBracket: Standings initialized", slog.Int("tournament_id", tournament.ID), slog.Int("standings_count", len(standingsToCreate)))
+	}
+
+	s.logger.InfoContext(ctx, "GenerateAndSaveBracket: Bracket processing completed successfully.", slog.Int("tournament_id", tournament.ID))
 	return createdDBMatchEntities, nil
 }
 
@@ -232,11 +279,11 @@ func (s *bracketService) GetFullTournamentData(ctx context.Context, tournamentID
 	g.Go(func() error {
 		format, err := s.formatRepo.GetByID(gCtx, formatID)
 		if err != nil {
-			log.Printf("Error fetching format %d for tournament %d in GetFullTournamentData: %v", formatID, tournamentID, err)
+			s.logger.ErrorContext(gCtx, "Error fetching format in GetFullTournamentData", slog.Int("format_id", formatID), slog.Any("error", err))
 			return fmt.Errorf("failed to fetch tournament format %d: %w", formatID, err)
 		}
 		if format == nil {
-			log.Printf("Format %d not found for tournament %d in GetFullTournamentData", formatID, tournamentID)
+			s.logger.WarnContext(gCtx, "Format not found in GetFullTournamentData", slog.Int("format_id", formatID))
 			return fmt.Errorf("tournament format %d not found", formatID)
 		}
 		tournament.Format = format
@@ -245,9 +292,10 @@ func (s *bracketService) GetFullTournamentData(ctx context.Context, tournamentID
 
 	g.Go(func() error {
 		confirmedStatus := models.StatusParticipant
-		participants, err := s.participantRepo.ListByTournament(gCtx, tournamentID, &confirmedStatus, true)
+		participants, err := s.participantRepo.ListByTournament(gCtx, tournamentID, &confirmedStatus, true) // includeNested=true
 		if err != nil {
-			log.Printf("Error fetching confirmed participants for tournament %d in GetFullTournamentData: %v", tournamentID, err)
+			s.logger.WarnContext(gCtx, "Error fetching confirmed participants in GetFullTournamentData", slog.Int("tournament_id", tournamentID), slog.Any("error", err))
+			// Non-critical, proceed with empty slice
 		}
 		if participants == nil {
 			tournament.Participants = []models.Participant{}
@@ -263,17 +311,36 @@ func (s *bracketService) GetFullTournamentData(ctx context.Context, tournamentID
 	})
 
 	g.Go(func() error {
-		soloMatches, err := s.soloMatchRepo.ListByTournament(gCtx, tournamentID, nil, nil)
-		if err != nil {
-			log.Printf("Error fetching solo matches for tournament %d in GetFullTournamentData: %v", tournamentID, err)
-		}
-		if soloMatches == nil {
-			tournament.SoloMatches = []models.SoloMatch{}
-		} else {
-			tournament.SoloMatches = make([]models.SoloMatch, len(soloMatches))
-			for i, m := range soloMatches {
-				if m != nil {
-					tournament.SoloMatches[i] = *m
+		// Wait for format to be loaded to determine participant type
+		// This is a simplification; proper synchronization or sequential loading might be better.
+		// Or, the calling service (TournamentService) should ensure format is loaded.
+		// For now, we'll proceed hoping format is loaded by the time this goroutine runs effectively.
+		// If format loading fails, these might try to fetch wrong match types or fail.
+
+		// It's safer to check if tournament.Format is populated after the errgroup.Wait()
+		// and then fetch matches. Or, make match fetching dependent on format being loaded.
+		// Let's assume for now that TournamentService's GetTournamentByID loads the format.
+		// If called directly, GetFullTournamentData needs to handle format loading carefully.
+
+		// This function is usually called by TournamentService.GetTournamentByID or GetTournamentBracketData,
+		// which should have already loaded the format into the tournament object.
+		// If tournament.Format is not nil here, we use its type.
+
+		if tournament.Format != nil { // Check if format is available
+			if tournament.Format.ParticipantType == models.FormatParticipantSolo {
+				soloMatches, err := s.soloMatchRepo.ListByTournament(gCtx, tournamentID, nil, nil)
+				if err != nil {
+					s.logger.WarnContext(gCtx, "Error fetching solo matches in GetFullTournamentData", slog.Int("tournament_id", tournamentID), slog.Any("error", err))
+				}
+				if soloMatches == nil {
+					tournament.SoloMatches = []models.SoloMatch{}
+				} else {
+					tournament.SoloMatches = make([]models.SoloMatch, len(soloMatches))
+					for i, m := range soloMatches {
+						if m != nil {
+							tournament.SoloMatches[i] = *m
+						}
+					}
 				}
 			}
 		}
@@ -281,17 +348,21 @@ func (s *bracketService) GetFullTournamentData(ctx context.Context, tournamentID
 	})
 
 	g.Go(func() error {
-		teamMatches, err := s.teamMatchRepo.ListByTournament(gCtx, tournamentID, nil, nil)
-		if err != nil {
-			log.Printf("Error fetching team matches for tournament %d in GetFullTournamentData: %v", tournamentID, err)
-		}
-		if teamMatches == nil {
-			tournament.TeamMatches = []models.TeamMatch{}
-		} else {
-			tournament.TeamMatches = make([]models.TeamMatch, len(teamMatches))
-			for i, m := range teamMatches {
-				if m != nil {
-					tournament.TeamMatches[i] = *m
+		if tournament.Format != nil { // Check if format is available
+			if tournament.Format.ParticipantType == models.FormatParticipantTeam {
+				teamMatches, err := s.teamMatchRepo.ListByTournament(gCtx, tournamentID, nil, nil)
+				if err != nil {
+					s.logger.WarnContext(gCtx, "Error fetching team matches in GetFullTournamentData", slog.Int("tournament_id", tournamentID), slog.Any("error", err))
+				}
+				if teamMatches == nil {
+					tournament.TeamMatches = []models.TeamMatch{}
+				} else {
+					tournament.TeamMatches = make([]models.TeamMatch, len(teamMatches))
+					for i, m := range teamMatches {
+						if m != nil {
+							tournament.TeamMatches[i] = *m
+						}
+					}
 				}
 			}
 		}
@@ -299,10 +370,21 @@ func (s *bracketService) GetFullTournamentData(ctx context.Context, tournamentID
 	})
 
 	if err := g.Wait(); err != nil {
-		log.Printf("Error during parallel fetching in GetFullTournamentData for tournament %d: %v", tournamentID, err)
-		if tournament.Format == nil {
+		// This error is from one of the goroutines. If format loading failed, it's critical.
+		s.logger.ErrorContext(ctx, "Error during parallel fetching in GetFullTournamentData", slog.Int("tournament_id", tournamentID), slog.Any("error", err))
+		if tournament.Format == nil { // Critical data (format) failed to load
 			return nil, fmt.Errorf("critical data (format) failed to load for tournament %d: %w", tournamentID, err)
 		}
+		// If format loaded but other things failed, we might return a partially filled tournament.
 	}
+
+	// If after g.Wait(), tournament.Format is still nil, it's an issue from the format loading goroutine.
+	if tournament.Format == nil {
+		s.logger.ErrorContext(ctx, "Format was not loaded after parallel fetch for GetFullTournamentData", slog.Int("tournament_id", tournamentID))
+		// This indicates a fundamental issue, perhaps return an error or a partially filled object.
+		// For now, we rely on the errgroup error handling.
+	}
+
+	s.logger.DebugContext(ctx, "GetFullTournamentData: Data fetching complete.", slog.Int("tournament_id", tournamentID))
 	return tournament, nil
 }

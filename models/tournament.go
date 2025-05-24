@@ -31,7 +31,9 @@ type Tournament struct {
 	LogoKey         *string          `json:"-" db:"logo_key"`
 	LogoURL         *string          `json:"logo_url,omitempty" db:"-"`
 
-	// Опциональные связанные сущности (не мапятся напрямую)
+	OverallWinnerParticipantID *int `json:"overall_winner_participant_id,omitempty" db:"overall_winner_participant_id"` // Added
+
+	// Optional linked entities (not mapped directly from DB in all queries)
 	Sport        *Sport        `json:"sport,omitempty" db:"-"`
 	Format       *Format       `json:"format,omitempty" db:"-"`
 	Organizer    *User         `json:"organizer,omitempty" db:"-"`

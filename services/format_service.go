@@ -12,12 +12,14 @@ import (
 )
 
 var (
-	ErrFormatNameRequired   = errors.New("format name is required")
-	ErrFormatNameConflict   = errors.New("format name already exists")
-	ErrFormatInUse          = errors.New("format cannot be deleted as it is currently in use")
-	ErrFormatCreationFailed = errors.New("failed to create format")
-	ErrFormatUpdateFailed   = errors.New("failed to update format")
-	ErrFormatDeleteFailed   = errors.New("failed to delete format")
+	ErrFormatNameRequired        = errors.New("format name is required")
+	ErrFormatNameConflict        = errors.New("format name already exists")
+	ErrFormatInUse               = errors.New("format cannot be deleted as it is currently in use")
+	ErrFormatCreationFailed      = errors.New("failed to create format")
+	ErrFormatUpdateFailed        = errors.New("failed to update format")
+	ErrFormatDeleteFailed        = errors.New("failed to delete format")
+	ErrInvalidBracketType        = errors.New("invalid bracket type specified")
+	ErrInvalidRoundRobinSettings = errors.New("invalid settings for RoundRobin format")
 )
 
 type FormatService interface {
@@ -58,17 +60,35 @@ func (s *formatService) CreateFormat(ctx context.Context, input CreateFormatInpu
 	if name == "" {
 		return nil, ErrFormatNameRequired
 	}
-	// Добавьте валидацию для BracketType, ParticipantType, если необходимо
+
+	if input.BracketType != "SingleElimination" && input.BracketType != "RoundRobin" {
+		return nil, fmt.Errorf("%w: %s. Supported types are 'SingleElimination', 'RoundRobin'", ErrInvalidBracketType, input.BracketType)
+	}
 
 	var settingsStrPointer *string
-	if len(input.SettingsJSON) > 0 && string(input.SettingsJSON) != "null" { // Проверяем, что JSON не пустой и не "null"
-		// Проверка валидности JSON
-		var js map[string]interface{}
-		if err := json.Unmarshal(input.SettingsJSON, &js); err != nil {
+	if len(input.SettingsJSON) > 0 && string(input.SettingsJSON) != "null" {
+		parsedSettings := make(map[string]interface{})
+		if err := json.Unmarshal(input.SettingsJSON, &parsedSettings); err != nil {
 			return nil, fmt.Errorf("invalid settings_json format: %w", err)
 		}
-		s := string(input.SettingsJSON)
-		settingsStrPointer = &s
+
+		if input.BracketType == "RoundRobin" {
+			var rrSettings models.RoundRobinSettings
+			if err := json.Unmarshal(input.SettingsJSON, &rrSettings); err != nil {
+				return nil, fmt.Errorf("%w: could not parse RoundRobin settings: %v", ErrInvalidRoundRobinSettings, err)
+			}
+			if rrSettings.NumberOfRounds < 1 || rrSettings.NumberOfRounds > 2 { // Example validation
+				return nil, fmt.Errorf("%w: NumberOfRounds must be 1 or 2, got %d", ErrInvalidRoundRobinSettings, rrSettings.NumberOfRounds)
+			}
+			// Re-marshal validated/defaulted settings if necessary, or just store the original valid JSON
+			validJsonBytes, _ := json.Marshal(rrSettings) // Assuming rrSettings might have defaults applied
+			s := string(validJsonBytes)
+			settingsStrPointer = &s
+		} else {
+			// For other bracket types, just store the provided JSON if it's valid
+			sJSON := string(input.SettingsJSON)
+			settingsStrPointer = &sJSON
+		}
 	}
 
 	format := &models.Format{
@@ -78,7 +98,7 @@ func (s *formatService) CreateFormat(ctx context.Context, input CreateFormatInpu
 		SettingsJSON:    settingsStrPointer,
 	}
 
-	err := s.formatRepo.Create(ctx, format) // Репозиторий должен поддерживать новые поля
+	err := s.formatRepo.Create(ctx, format)
 	if err != nil {
 		if errors.Is(err, repositories.ErrFormatNameConflict) {
 			return nil, ErrFormatNameConflict
@@ -89,7 +109,6 @@ func (s *formatService) CreateFormat(ctx context.Context, input CreateFormatInpu
 }
 
 func (s *formatService) GetFormatByID(ctx context.Context, id int) (*models.Format, error) {
-	// Этот метод остается без изменений, т.к. репозиторий уже возвращает все поля
 	format, err := s.formatRepo.GetByID(ctx, id)
 	if err != nil {
 		if errors.Is(err, repositories.ErrFormatNotFound) {
@@ -101,7 +120,6 @@ func (s *formatService) GetFormatByID(ctx context.Context, id int) (*models.Form
 }
 
 func (s *formatService) GetAllFormats(ctx context.Context) ([]models.Format, error) {
-	// Этот метод также остается без изменений
 	formats, err := s.formatRepo.GetAll(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get all formats: %w", err)
@@ -132,31 +150,50 @@ func (s *formatService) UpdateFormat(ctx context.Context, id int, input UpdateFo
 			updated = true
 		}
 	}
-	if input.BracketType != nil && *input.BracketType != formatToUpdate.BracketType {
-		// Добавить валидацию BracketType, если нужно
-		formatToUpdate.BracketType = *input.BracketType
-		updated = true
+
+	currentBracketType := formatToUpdate.BracketType
+	if input.BracketType != nil {
+		if *input.BracketType != "SingleElimination" && *input.BracketType != "RoundRobin" {
+			return nil, fmt.Errorf("%w: %s. Supported types are 'SingleElimination', 'RoundRobin'", ErrInvalidBracketType, *input.BracketType)
+		}
+		if *input.BracketType != formatToUpdate.BracketType {
+			formatToUpdate.BracketType = *input.BracketType
+			currentBracketType = *input.BracketType // Update for settings validation
+			updated = true
+		}
 	}
+
 	if input.ParticipantType != nil && *input.ParticipantType != formatToUpdate.ParticipantType {
-		// Валидация ParticipantType уже есть в CHECK constraint БД, но можно и здесь
 		formatToUpdate.ParticipantType = *input.ParticipantType
 		updated = true
 	}
 
-	if input.SettingsJSON != nil { // Поле было передано
+	if input.SettingsJSON != nil {
 		if len(*input.SettingsJSON) == 0 || string(*input.SettingsJSON) == "null" {
-			// Пользователь хочет очистить settings
-			if formatToUpdate.SettingsJSON != nil { // Если было значение, а теперь нет
+			if formatToUpdate.SettingsJSON != nil {
 				formatToUpdate.SettingsJSON = nil
 				updated = true
 			}
 		} else {
-			// Проверка валидности JSON
-			var js map[string]interface{}
-			if errJson := json.Unmarshal(*input.SettingsJSON, &js); errJson != nil {
+			parsedSettings := make(map[string]interface{})
+			if errJson := json.Unmarshal(*input.SettingsJSON, &parsedSettings); errJson != nil {
 				return nil, fmt.Errorf("invalid settings_json format for update: %w", errJson)
 			}
+
 			newSettingsStr := string(*input.SettingsJSON)
+
+			if currentBracketType == "RoundRobin" {
+				var rrSettings models.RoundRobinSettings
+				if errJson := json.Unmarshal(*input.SettingsJSON, &rrSettings); errJson != nil {
+					return nil, fmt.Errorf("%w: could not parse RoundRobin settings for update: %v", ErrInvalidRoundRobinSettings, errJson)
+				}
+				if rrSettings.NumberOfRounds < 1 || rrSettings.NumberOfRounds > 2 {
+					return nil, fmt.Errorf("%w: NumberOfRounds must be 1 or 2, got %d", ErrInvalidRoundRobinSettings, rrSettings.NumberOfRounds)
+				}
+				validJsonBytes, _ := json.Marshal(rrSettings)
+				newSettingsStr = string(validJsonBytes)
+			}
+
 			if formatToUpdate.SettingsJSON == nil || *formatToUpdate.SettingsJSON != newSettingsStr {
 				formatToUpdate.SettingsJSON = &newSettingsStr
 				updated = true
@@ -165,10 +202,10 @@ func (s *formatService) UpdateFormat(ctx context.Context, id int, input UpdateFo
 	}
 
 	if !updated {
-		return formatToUpdate, nil // Нет изменений
+		return formatToUpdate, nil
 	}
 
-	err = s.formatRepo.Update(ctx, formatToUpdate) // Репозиторий должен поддерживать обновление всех полей
+	err = s.formatRepo.Update(ctx, formatToUpdate)
 	if err != nil {
 		switch {
 		case errors.Is(err, repositories.ErrFormatNotFound):
@@ -183,13 +220,12 @@ func (s *formatService) UpdateFormat(ctx context.Context, id int, input UpdateFo
 }
 
 func (s *formatService) DeleteFormat(ctx context.Context, id int) error {
-	// Этот метод остается без изменений, логика проверки использования формата в репозитории
 	err := s.formatRepo.Delete(ctx, id)
 	if err != nil {
 		switch {
 		case errors.Is(err, repositories.ErrFormatNotFound):
 			return ErrFormatNotFound
-		case errors.Is(err, repositories.ErrFormatInUse): // Репозиторий должен возвращать эту ошибку
+		case errors.Is(err, repositories.ErrFormatInUse):
 			return ErrFormatInUse
 		default:
 			return fmt.Errorf("%w (id: %d): %w", ErrFormatDeleteFailed, id, err)

@@ -208,3 +208,79 @@ ALTER TABLE formats
 ALTER TABLE formats ADD CONSTRAINT chk_format_participant_type CHECK (participant_type IN ('solo', 'team'));
 
 
+-- Таблица для хранения турнирной таблицы (положения участников) для круговых турниров
+CREATE TABLE tournament_standings (
+                                      id SERIAL PRIMARY KEY,
+                                      tournament_id INT NOT NULL,
+                                      participant_id INT NOT NULL,
+                                      points INT NOT NULL DEFAULT 0,
+                                      games_played INT NOT NULL DEFAULT 0,
+                                      wins INT NOT NULL DEFAULT 0,
+                                      draws INT NOT NULL DEFAULT 0,
+                                      losses INT NOT NULL DEFAULT 0,
+                                      score_for INT NOT NULL DEFAULT 0, -- Забитые голы/очки
+                                      score_against INT NOT NULL DEFAULT 0, -- Пропущенные голы/очки
+                                      score_difference INT NOT NULL DEFAULT 0, -- Разница (score_for - score_against)
+                                      rank INT, -- Опционально, может вычисляться при запросе
+                                      updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                                      FOREIGN KEY (tournament_id) REFERENCES tournaments (id) ON DELETE CASCADE,
+                                      FOREIGN KEY (participant_id) REFERENCES participants (id) ON DELETE CASCADE,
+                                      UNIQUE (tournament_id, participant_id)
+);
+
+CREATE INDEX idx_tournament_standings_tournament_id ON tournament_standings (tournament_id);
+CREATE INDEX idx_tournament_standings_participant_id ON tournament_standings (participant_id);
+CREATE INDEX idx_tournament_standings_ranking ON tournament_standings (tournament_id, points DESC, score_difference DESC, score_for DESC);
+
+CREATE OR REPLACE FUNCTION update_standings_updated_at_column()
+    RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
+
+CREATE TRIGGER update_tournament_standings_updated_at
+    BEFORE UPDATE ON tournament_standings
+    FOR EACH ROW
+EXECUTE FUNCTION update_standings_updated_at_column();
+
+DO $$
+    BEGIN
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='formats' AND column_name='bracket_type') THEN
+            ALTER TABLE formats ADD COLUMN bracket_type VARCHAR(50) NOT NULL DEFAULT 'SingleElimination';
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='formats' AND column_name='participant_type') THEN
+            ALTER TABLE formats ADD COLUMN participant_type VARCHAR(10) NOT NULL DEFAULT 'solo';
+            -- Добавляем CHECK constraint после добавления колонки, если его еще нет
+            IF NOT EXISTS (SELECT 1 FROM information_schema.constraint_column_usage WHERE table_name='formats' AND constraint_name='chk_format_participant_type') THEN
+                ALTER TABLE formats ADD CONSTRAINT chk_format_participant_type CHECK (participant_type IN ('solo', 'team'));
+            END IF;
+        END IF;
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='formats' AND column_name='settings_json') THEN
+            ALTER TABLE formats ADD COLUMN settings_json TEXT;
+        END IF;
+    END $$;
+
+
+DO $$
+    BEGIN
+        IF NOT EXISTS (
+            SELECT 1
+            FROM pg_constraint
+            WHERE conname = 'chk_format_participant_type' AND conrelid = 'formats'::regclass
+        ) THEN
+            ALTER TABLE formats ADD CONSTRAINT chk_format_participant_type CHECK (participant_type IN ('solo', 'team'));
+        END IF;
+    END $$;
+
+ALTER TABLE tournaments
+    ADD CONSTRAINT tournaments_organizer_id_name_key UNIQUE (organizer_id, name);
+
+ALTER TABLE tournaments
+    ADD COLUMN overall_winner_participant_id INT,
+    ADD CONSTRAINT fk_tournaments_overall_winner FOREIGN KEY (overall_winner_participant_id) REFERENCES participants(id) ON DELETE SET NULL;
+
+CREATE INDEX idx_tournaments_overall_winner_participant_id ON tournaments (overall_winner_participant_id);
+
+
