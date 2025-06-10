@@ -184,9 +184,9 @@ func main() {
 		dashboardHandler,
 	)
 	corsHandler := cors.New(cors.Options{
-		AllowedOrigins:   []string{"https://tournament-system-latest.onrender.com"},
+		AllowedOrigins:   []string{"https://tournament-frontend-fgm0.onrender.com"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Authorization", "Content-Type", "X-Requested-With", "Accept", "Origin"},
+		AllowedHeaders:   []string{"*"},
 		AllowCredentials: true,
 	}).Handler(router)
 
