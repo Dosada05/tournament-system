@@ -44,41 +44,44 @@ func (g *RoundRobinGenerator) GenerateBracket(ctx context.Context, params Genera
 	}
 
 	matches := make([]*BracketMatch, 0)
-	matchOrder := 0
+
+	pairIndex := 0 // Порядковый номер пары
 
 	// Generate pairings
 	for i := 0; i < len(participants); i++ {
 		for j := i + 1; j < len(participants); j++ {
+			pairIndex++
 			p1ID := participants[i].ID
 			p2ID := participants[j].ID
 
-			// First leg
-			matchOrder++
+			// Первый круг (Leg 1)
 			matches = append(matches, &BracketMatch{
-				UID:            fmt.Sprintf("T%d_RRM%d_L1_P%dvsP%d", tournament.ID, matchOrder, p1ID, p2ID),
-				Round:          1, // Conceptual round or game day. For simplicity, using 1 for all.
-				OrderInRound:   matchOrder,
+				UID:            fmt.Sprintf("T%d_RRP%d_L1_%dvs%d", tournament.ID, pairIndex, p1ID, p2ID), // RRP для RoundRobin Pair
+				Round:          1,                                                                        // Круг 1
+				OrderInRound:   pairIndex,                                                                // Порядок матча в этом круге (основан на индексе пары)
 				Participant1ID: &p1ID,
 				Participant2ID: &p2ID,
 			})
 
 			if rrSettings.NumberOfRounds == 2 {
-				// Second leg (participants swapped for home/away implication if needed, or just a second match)
-				// UID needs to be unique for the second leg match
+				// Второй круг (Leg 2)
 				matches = append(matches, &BracketMatch{
-					UID:            fmt.Sprintf("T%d_RRM%d_L2_P%dvP%ds", tournament.ID, matchOrder, p2ID, p1ID), // Swapped for UID
-					Round:          1,                                                                           // Still part of the overall "league phase"
-					OrderInRound:   matchOrder + len(participants)*(len(participants)-1)/2,                      // Ensure unique order
-					Participant1ID: &p2ID,                                                                       // For the match, P1 is P2 from the first leg
-					Participant2ID: &p1ID,                                                                       // For the match, P2 is P1 from the first leg
+					UID:            fmt.Sprintf("T%d_RRP%d_L2_%dvs%d", tournament.ID, pairIndex, p2ID, p1ID), // Участники меняются местами в UID для наглядности
+					Round:          2,                                                                        // Круг 2
+					OrderInRound:   pairIndex,                                                                // Порядок матча в этом круге (соответствует порядку в первом круге для той же пары)
+					Participant1ID: &p2ID,                                                                    // Участники меняются местами для самого матча
+					Participant2ID: &p1ID,
 				})
 			}
 		}
 	}
 
-	// Sort matches for consistent order if needed, e.g., by OrderInRound
+	// Сортировка матчей: сначала по номеру круга, затем по порядку в круге
 	sort.Slice(matches, func(i, j int) bool {
-		return matches[i].OrderInRound < matches[j].OrderInRound
+		if matches[i].Round != matches[j].Round {
+			return matches[i].Round < matches[j].Round
+		}
+		return matches[i].OrderInRound < matches[i].OrderInRound // Исправлено на matches[j].OrderInRound
 	})
 
 	return matches, nil

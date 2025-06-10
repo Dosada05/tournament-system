@@ -6,9 +6,9 @@ import (
 )
 
 type UploadResult struct {
-	Key      string // Ключ (путь) загруженного файла в хранилище
-	Location string // Полный URL файла (может быть пустым, если не предоставляется хранилищем напрямую)
-	ETag     string // ETag объекта (полезно для кеширования)
+	Key      string
+	Location string
+	ETag     string
 }
 
 type FileUploader interface {

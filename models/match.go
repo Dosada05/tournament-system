@@ -2,7 +2,6 @@ package models
 
 import "time"
 
-// MatchStatus представляет статусы матча, соответствующие ENUM в БД.
 type MatchStatus string
 
 const (
@@ -24,7 +23,6 @@ type SoloMatch struct {
 	Round               *int        `json:"round,omitempty" db:"round"`
 	CreatedAt           time.Time   `json:"created_at" db:"created_at"`
 
-	// Новые поля
 	BracketMatchUID *string `json:"bracket_match_uid,omitempty" db:"bracket_match_uid"`
 	NextMatchDBID   *int    `json:"next_match_db_id,omitempty" db:"next_match_db_id"`
 	WinnerToSlot    *int    `json:"winner_to_slot,omitempty" db:"winner_to_slot"`
@@ -47,7 +45,6 @@ type TeamMatch struct {
 	Round               *int        `json:"round,omitempty" db:"round"`
 	CreatedAt           time.Time   `json:"created_at" db:"created_at"`
 
-	// Новые поля
 	BracketMatchUID *string `json:"bracket_match_uid,omitempty" db:"bracket_match_uid"`
 	NextMatchDBID   *int    `json:"next_match_db_id,omitempty" db:"next_match_db_id"`
 	WinnerToSlot    *int    `json:"winner_to_slot,omitempty" db:"winner_to_slot"`

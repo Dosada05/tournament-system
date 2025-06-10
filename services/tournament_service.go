@@ -233,7 +233,7 @@ func (s *tournamentService) CreateTournament(ctx context.Context, organizerID in
 		EndDate:         input.EndDate,
 		Location:        input.Location,
 		MaxParticipants: input.MaxParticipants,
-		Status:          models.StatusSoon, // Initial status
+		Status:          models.StatusSoon,
 	}
 
 	err = s.tournamentRepo.Create(ctx, tournament)
@@ -243,7 +243,7 @@ func (s *tournamentService) CreateTournament(ctx context.Context, organizerID in
 		}
 		return nil, fmt.Errorf("%w: %w", ErrTournamentCreationFailed, err)
 	}
-	s.populateTournamentDetails(ctx, tournament) // Populate details including logo URL if any
+	s.populateTournamentDetails(ctx, tournament)
 	return tournament, nil
 }
 

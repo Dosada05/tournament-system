@@ -5,11 +5,8 @@ import (
 	"github.com/Dosada05/tournament-system/handlers"
 	"github.com/Dosada05/tournament-system/middleware"
 	"github.com/Dosada05/tournament-system/models"
-
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
-	"github.com/go-chi/cors"
-	httpSwagger "github.com/swaggo/http-swagger"
 )
 
 func SetupRoutes(
@@ -28,18 +25,7 @@ func SetupRoutes(
 	router.Use(chiMiddleware.Recoverer)
 	router.Use(chiMiddleware.RequestID)
 	router.Use(chiMiddleware.RealIP)
-
-	router.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"}, // Настрой для продакшена!
-		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
-		ExposedHeaders:   []string{"Link"},
-		AllowCredentials: true,
-		MaxAge:           300,
-	}))
-
-	router.Get("/swagger/*", httpSwagger.WrapHandler)
-
+	
 	// --- Маршруты Auth ---
 	router.Route("/auth", func(r chi.Router) { // Изменил с /users на /auth для ясности
 		r.Post("/signup", authHandler.Register)
@@ -140,9 +126,7 @@ func SetupRoutes(
 	// --- Маршруты Participants (управление заявками) ---
 	router.Route("/participants/{participantID}", func(r chi.Router) {
 		r.Use(middleware.Authenticate)
-		// Отмена своей регистрации (пользователь/капитан)
 		r.Delete("/cancel", participantHandler.CancelRegistration)
-		// Управление заявками (для организатора турнира - можно добавить Authorize)
 		r.With(middleware.Authorize(models.RoleOrganizer, models.RoleAdmin)).Patch("/status", participantHandler.UpdateApplicationStatus)
 	})
 

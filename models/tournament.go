@@ -2,7 +2,6 @@ package models
 
 import "time"
 
-// TournamentStatus представляет статусы турнира, соответствующие ENUM в БД.
 type TournamentStatus string
 
 const (
@@ -13,7 +12,6 @@ const (
 	StatusCanceled     TournamentStatus = "canceled"
 )
 
-// Tournament представляет турнир.
 type Tournament struct {
 	ID              int              `json:"id" db:"id"`
 	Name            string           `json:"name" db:"name"`
@@ -33,31 +31,10 @@ type Tournament struct {
 
 	OverallWinnerParticipantID *int `json:"overall_winner_participant_id,omitempty" db:"overall_winner_participant_id"` // Added
 
-	// Optional linked entities (not mapped directly from DB in all queries)
 	Sport        *Sport        `json:"sport,omitempty" db:"-"`
 	Format       *Format       `json:"format,omitempty" db:"-"`
 	Organizer    *User         `json:"organizer,omitempty" db:"-"`
 	Participants []Participant `json:"participants,omitempty" db:"-"`
 	SoloMatches  []SoloMatch   `json:"solo_matches,omitempty" db:"-"`
 	TeamMatches  []TeamMatch   `json:"team_matches,omitempty" db:"-"`
-}
-
-func (t Tournament) Deadline() (deadline time.Time, ok bool) {
-	//TODO implement me
-	panic("implement me")
-}
-
-func (t Tournament) Done() <-chan struct{} {
-	//TODO implement me
-	panic("implement me")
-}
-
-func (t Tournament) Err() error {
-	//TODO implement me
-	panic("implement me")
-}
-
-func (t Tournament) Value(key any) any {
-	//TODO implement me
-	panic("implement me")
 }

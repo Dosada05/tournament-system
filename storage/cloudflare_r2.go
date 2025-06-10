@@ -106,12 +106,11 @@ func (u *cloudflareR2Uploader) GetPublicURL(key string) string {
 
 	baseURL, err := url.Parse(u.publicBaseURL)
 	if err != nil {
-		// В реальном приложении здесь лучше использовать логгер вместо fmt.Printf
 		fmt.Printf("Error parsing publicBaseURL '%s': %v\n", u.publicBaseURL, err)
 		return ""
 	}
 
-	pathURL, err := url.Parse(key) // Ключ может быть просто путем, url.Parse справится
+	pathURL, err := url.Parse(key)
 	if err != nil {
 		fmt.Printf("Error parsing key '%s' as URL path: %v\n", key, err)
 		return ""

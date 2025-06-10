@@ -28,6 +28,6 @@ type User struct {
 
 // Credentials используется для передачи данных аутентификации (логин/пароль).
 type Credentials struct {
-	Email    string `json:"email" validate:"required,email"` // Валидация уместна в DTO
-	Password string `json:"password" validate:"required"`    // Валидация уместна в DTO
+	Email    string `json:"email" validate:"required,email"`
+	Password string `json:"password" validate:"required"`
 }

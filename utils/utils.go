@@ -40,35 +40,3 @@ func IsValidEmail(email string) bool {
 	// return re.MatchString(email)
 	return true // Заглушка
 }
-
-//
-//func GenerateJWT(user *models.User) (string, error) {
-//	now := time.Now()
-//	claims := jwt.MapClaims{
-//		"id":   user.ID,
-//		"role": user.Role,
-//		"exp":  now.Add(time.Hour * 24).Unix(),
-//	}
-//
-//	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-//
-//	return token.SignedString(jwtSecret)
-//}
-//
-//// GetUserIDFromContext достаёт user_id из JWT claims в контексте запроса
-//func GetUserIDFromContext(ctx context.Context) (int, error) {
-//	claims, ok := ctx.Value(userKey).(jwt.MapClaims)
-//	if !ok {
-//		return 0, errors.New("user claims not found in context")
-//	}
-//	idRaw, ok := claims["user_id"]
-//	if !ok {
-//		return 0, errors.New("user_id not found in token")
-//	}
-//
-//	idFloat, ok := idRaw.(float64)
-//	if !ok {
-//		return 0, errors.New("user_id has invalid type")
-//	}
-//	return int(idFloat), nil
-//}
