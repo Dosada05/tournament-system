@@ -20,12 +20,14 @@ func SetupRoutes(
 	participantHandler *handlers.ParticipantHandler,
 	webSocketHandler *handlers.WebSocketHandler,
 	formatHandler *handlers.FormatHandler,
+	adminHandler *handlers.AdminUserHandler,
+	dashboardHandler *handlers.DashboardHandler,
 ) {
 	router.Use(chiMiddleware.Logger)
 	router.Use(chiMiddleware.Recoverer)
 	router.Use(chiMiddleware.RequestID)
 	router.Use(chiMiddleware.RealIP)
-	
+
 	// --- Маршруты Auth ---
 	router.Route("/auth", func(r chi.Router) { // Изменил с /users на /auth для ясности
 		r.Post("/signup", authHandler.Register)
@@ -131,5 +133,16 @@ func SetupRoutes(
 	})
 
 	router.With(middleware.Authenticate).Get("/ws/tournaments/{tournamentID}", webSocketHandler.ServeWs)
+
+	router.Route("/admin", func(r chi.Router) {
+		r.Use(middleware.Authenticate)
+		r.Use(middleware.Authorize(models.RoleAdmin))
+
+		r.Route("/users", func(r chi.Router) {
+			r.Get("/", adminHandler.ListUsers)
+			r.Delete("/{id}", adminHandler.DeleteUser)
+			r.Get("/dashboard", dashboardHandler.Stats)
+		})
+	})
 
 }

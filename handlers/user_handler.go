@@ -22,16 +22,6 @@ func NewUserHandler(us services.UserService) *UserHandler {
 	}
 }
 
-// GetUserByID godoc
-// @Summary Получить пользователя по ID
-// @Tags users
-// @Description Возвращает публичный профиль пользователя по его идентификатору
-// @Produce json
-// @Param id path int true "User ID"
-// @Success 200 {object} map[string]interface{} "Пользователь найден"
-// @Failure 400 {object} map[string]string "Некорректный ID"
-// @Failure 404 {object} map[string]string "Пользователь не найден"
-// @Router /users/{id} [get]
 func (h *UserHandler) GetUserByID(w http.ResponseWriter, r *http.Request) {
 	requestedUserID, err := getUserIDFromURL(r)
 	if err != nil {
@@ -57,21 +47,6 @@ func (h *UserHandler) GetUserByID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// UpdateUserByID godoc
-// @Summary Обновить профиль пользователя
-// @Tags users
-// @Description Обновляет профиль пользователя. Доступно самому пользователю или админу.
-// @Accept json
-// @Produce json
-// @Param id path int true "User ID"
-// @Param body body services.UpdateProfileInput true "Данные для обновления профиля"
-// @Success 200 {object} map[string]interface{} "Профиль обновлён"
-// @Failure 400 {object} map[string]string "Ошибка валидации"
-// @Failure 401 {object} map[string]string "Неавторизован"
-// @Failure 403 {object} map[string]string "Нет прав"
-// @Failure 404 {object} map[string]string "Пользователь не найден"
-// @Security BearerAuth
-// @Router /users/{id} [put]
 func (h *UserHandler) UpdateUserByID(w http.ResponseWriter, r *http.Request) {
 	requestedUserID, err := getUserIDFromURL(r)
 	if err != nil {
@@ -127,21 +102,6 @@ func (h *UserHandler) UpdateUserByID(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// UploadUserLogo godoc
-// @Summary Загрузить аватар пользователя
-// @Tags users
-// @Description Загружает или обновляет аватар для пользователя (multipart/form-data).
-// @Accept multipart/form-data
-// @Produce json
-// @Param id path int true "User ID"
-// @Param avatar formData file true "Файл аватара"
-// @Success 200 {object} map[string]interface{} "Аватар обновлён"
-// @Failure 400 {object} map[string]string "Ошибка загрузки файла"
-// @Failure 401 {object} map[string]string "Неавторизован"
-// @Failure 403 {object} map[string]string "Нет прав"
-// @Failure 404 {object} map[string]string "Пользователь не найден"
-// @Security BearerAuth
-// @Router /users/{id}/avatar [post]
 func (h *UserHandler) UploadUserLogo(w http.ResponseWriter, r *http.Request) {
 	requestedUserID, err := getUserIDFromURL(r)
 	if err != nil {

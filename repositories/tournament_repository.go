@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Dosada05/tournament-system/models"
@@ -39,6 +40,7 @@ type TournamentRepository interface {
 	UpdateLogoKey(ctx context.Context, tournamentID int, logoKey *string) error
 	UpdateOverallWinner(ctx context.Context, exec SQLExecutor, tournamentID int, winnerParticipantID *int) error // Added
 	GetTournamentsForAutoStatusUpdate(ctx context.Context, exec SQLExecutor, currentTime time.Time) ([]*models.Tournament, error)
+	CountTournaments(ctx context.Context, filters map[string]interface{}) (int, error)
 }
 
 type postgresTournamentRepository struct {
@@ -326,4 +328,22 @@ func (r *postgresTournamentRepository) handleTournamentError(err error) error {
 		}
 	}
 	return err
+}
+
+func (r *postgresTournamentRepository) CountTournaments(ctx context.Context, filters map[string]interface{}) (int, error) {
+	query := "SELECT COUNT(*) FROM tournaments"
+	var args []interface{}
+	var where []string
+	i := 1
+	for k, v := range filters {
+		where = append(where, fmt.Sprintf("%s = $%d", k, i))
+		args = append(args, v)
+		i++
+	}
+	if len(where) > 0 {
+		query += " WHERE " + strings.Join(where, " AND ")
+	}
+	var count int
+	err := r.db.QueryRowContext(ctx, query, args...).Scan(&count)
+	return count, err
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"github.com/go-chi/cors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -84,6 +85,9 @@ func main() {
 	formatService := services.NewFormatService(formatRepo)
 	teamService := services.NewTeamService(teamRepo, userRepo, sportRepo, cloudflareUploader)
 	inviteService := services.NewInviteService(inviteRepo, teamRepo, userRepo)
+	adminService := services.NewAdminUserService(userRepo)
+
+	dashboardService := services.NewDashboardService(userRepo, tournamentRepo, soloMatchRepo, teamMatchRepo)
 
 	bracketService := services.NewBracketService(
 		formatRepo,
@@ -160,6 +164,8 @@ func main() {
 	inviteHandler := handlers.NewInviteHandler(inviteService)
 	participantHandler := handlers.NewParticipantHandler(participantService)
 	webSocketHandler := handlers.NewWebSocketHandler(wsHub)
+	adminHandler := handlers.NewAdminUserHandler(adminService)
+	dashboardHandler := handlers.NewDashboardHandler(dashboardService)
 	logger.Info("HTTP handlers initialized")
 
 	router := chi.NewRouter()
@@ -174,12 +180,21 @@ func main() {
 		participantHandler,
 		webSocketHandler,
 		formatHandler,
+		adminHandler,
+		dashboardHandler,
 	)
+	corsHandler := cors.New(cors.Options{
+		AllowedOrigins:   []string{"https://tournament-system-latest.onrender.com"},
+		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Authorization", "Content-Type", "X-Requested-With", "Accept", "Origin"},
+		AllowCredentials: true,
+	}).Handler(router)
+
 	logger.Info("Routes configured")
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.ServerPort),
-		Handler:      router,
+		Handler:      corsHandler,
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		IdleTimeout:  120 * time.Second,
