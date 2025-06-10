@@ -25,10 +25,6 @@ import (
 
 const schedulerInterval = 30 * time.Second
 
-// @title Tournament System API
-// @version 0.0.1
-// @description This is a server for the tournament system.
-// @host localhost:8080
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
@@ -66,7 +62,6 @@ func main() {
 	}
 	logger.Info("Cloudflare R2 uploader initialized")
 
-	// Инициализация WebSocket Hub
 	wsHub := brackets.NewHub()
 	go wsHub.Run()
 	logger.Info("WebSocket Hub started")
@@ -80,7 +75,7 @@ func main() {
 	participantRepo := repositories.NewPostgresParticipantRepository(dbConn)
 	soloMatchRepo := repositories.NewPostgresSoloMatchRepository(dbConn)
 	teamMatchRepo := repositories.NewPostgresTeamMatchRepository(dbConn)
-	standingRepo := repositories.NewPostgresTournamentStandingRepository(dbConn) // Added
+	standingRepo := repositories.NewPostgresTournamentStandingRepository(dbConn)
 	logger.Info("Repositories initialized")
 
 	authService := services.NewAuthService(userRepo)
@@ -95,8 +90,8 @@ func main() {
 		participantRepo,
 		soloMatchRepo,
 		teamMatchRepo,
-		standingRepo, // Added
-		logger,       // Added
+		standingRepo,
+		logger,
 	)
 
 	matchService := services.NewMatchService(
@@ -105,10 +100,10 @@ func main() {
 		teamMatchRepo,
 		tournamentRepo,
 		participantRepo,
-		formatRepo,   // Added
-		standingRepo, // Added
+		formatRepo,
+		standingRepo,
 		wsHub,
-		logger, // Added
+		logger,
 	)
 
 	tournamentService := services.NewTournamentService(
@@ -120,7 +115,7 @@ func main() {
 		participantRepo,
 		soloMatchRepo,
 		teamMatchRepo,
-		standingRepo, // Added
+		standingRepo,
 		bracketService,
 		matchService,
 		cloudflareUploader,
@@ -156,7 +151,6 @@ func main() {
 		}
 	}()
 
-	// Инициализация обработчиков HTTP
 	authHandler := handlers.NewAuthHandler(authService, cfg.JWTSecretKey)
 	userHandler := handlers.NewUserHandler(userService)
 	teamHandler := handlers.NewTeamHandler(teamService, userService)
@@ -168,7 +162,6 @@ func main() {
 	webSocketHandler := handlers.NewWebSocketHandler(wsHub)
 	logger.Info("HTTP handlers initialized")
 
-	// Настройка маршрутизатора
 	router := chi.NewRouter()
 	api.SetupRoutes(
 		router,
@@ -184,7 +177,6 @@ func main() {
 	)
 	logger.Info("Routes configured")
 
-	// Настройка и запуск HTTP-сервера
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.ServerPort),
 		Handler:      router,
@@ -200,7 +192,6 @@ func main() {
 		serverErrors <- server.ListenAndServe()
 	}()
 
-	// Ожидание сигнала завершения
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 

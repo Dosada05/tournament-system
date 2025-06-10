@@ -2,7 +2,6 @@ package models
 
 import "time"
 
-// ParticipantStatus представляет статусы участника турнира, соответствующие ENUM в БД.
 type ParticipantStatus string
 
 const (

@@ -24,7 +24,6 @@ func NewTournamentHandler(ts services.TournamentService, ms services.MatchServic
 	}
 }
 
-// CreateHandler создает новый турнир.
 func (h *TournamentHandler) CreateHandler(w http.ResponseWriter, r *http.Request) {
 	currentUserID, err := middleware.GetUserIDFromContext(r.Context())
 	if err != nil {
@@ -100,8 +99,6 @@ func (h *TournamentHandler) ListHandler(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 	if statusStr := query.Get("status"); statusStr != "" {
-		// Валидация значения статуса должна быть строже
-		// Например, через switch или map
 		validStatuses := map[models.TournamentStatus]bool{
 			models.StatusSoon:         true,
 			models.StatusRegistration: true,
@@ -202,7 +199,6 @@ func (h *TournamentHandler) UpdateStatusHandler(w http.ResponseWriter, r *http.R
 		badRequestResponse(w, r, err)
 		return
 	}
-	// Дополнительная валидация значения статуса
 	if !isValidTournamentStatus(statusInput.Status) {
 		badRequestResponse(w, r, fmt.Errorf("invalid status value: %s", statusInput.Status))
 		return
@@ -287,23 +283,6 @@ func (h *TournamentHandler) UploadTournamentLogoHandler(w http.ResponseWriter, r
 	}
 }
 
-// UpdateSoloMatchResultHandler godoc
-// @Summary Обновить результат одиночного матча
-// @Tags tournaments
-// @Description Обновляет результат (счет и победителя) одиночного матча. Доступно организатору турнира.
-// @Accept json
-// @Produce json
-// @Param tournamentID path int true "Tournament ID"
-// @Param matchID path int true "Solo Match ID"
-// @Param body body services.UpdateMatchResultInput true "Данные результата матча (score, winner_participant_id - может быть null для ничьи)"
-// @Success 200 {object} map[string]interface{} "Результат матча обновлен"
-// @Failure 400 {object} map[string]string "Некорректные ID или данные результата"
-// @Failure 401 {object} map[string]string "Неавторизован"
-// @Failure 403 {object} map[string]string "Нет прав (не организатор) или турнир не активен"
-// @Failure 404 {object} map[string]string "Турнир или матч не найден"
-// @Failure 409 {object} map[string]string "Матч уже завершен или невалидный победитель"
-// @Security BearerAuth
-// @Router /tournaments/{tournamentID}/matches/solo/{matchID}/result [patch]
 func (h *TournamentHandler) UpdateSoloMatchResultHandler(w http.ResponseWriter, r *http.Request) {
 	tournamentID, err := getIDFromURL(r, "tournamentID")
 	if err != nil {
@@ -334,19 +313,23 @@ func (h *TournamentHandler) UpdateSoloMatchResultHandler(w http.ResponseWriter, 
 		return
 	}
 
-	// Проверяем, не завершился ли турнир
-	if updatedMatch.NextMatchDBID == nil && updatedMatch.WinnerParticipantID != nil {
-		// Это был финальный матч, и он завершен
-		log.Printf("Handler: Final solo match %d completed for tournament %d. Attempting to finalize tournament.", updatedMatch.ID, tournamentID)
-		_, finalizeErr := h.tournamentService.FinalizeTournament(r.Context(), tournamentID, updatedMatch.WinnerParticipantID, currentUserID)
-		if finalizeErr != nil {
-			// Логируем ошибку финализации, но результат матча уже обновлен.
-			// Клиент получит уведомление о завершении матча, а затем, возможно, об ошибке финализации.
-			// Или, если это критично, можно вернуть ошибку клиенту.
-			log.Printf("Error finalizing tournament %d after match %d: %v", tournamentID, updatedMatch.ID, finalizeErr)
-			// Пока не возвращаем ошибку клиенту, чтобы он увидел результат матча.
-			// mapServiceErrorToHTTP(w, r, finalizeErr)
-			// return
+	currentTournament, tErr := h.tournamentService.GetTournamentByID(r.Context(), tournamentID, 0)
+
+	if tErr != nil {
+		log.Printf("Handler: Could not fetch tournament %d details to check format for finalization after solo match update: %v", tournamentID, tErr)
+		// Матч обновлен, но автоматическая финализация может не произойти. Логируем и продолжаем.
+	} else if currentTournament != nil && currentTournament.Format != nil {
+		// Финализируем только если это Single Elimination и это был последний матч ветки
+		if currentTournament.Format.BracketType == "SingleElimination" { //
+			if updatedMatch.NextMatchDBID == nil && updatedMatch.WinnerParticipantID != nil {
+				log.Printf("Handler: Final Single Elimination solo match %d completed for tournament %d. Attempting to finalize tournament.", updatedMatch.ID, tournamentID)
+				_, finalizeErr := h.tournamentService.FinalizeTournament(r.Context(), tournamentID, updatedMatch.WinnerParticipantID, currentUserID)
+				if finalizeErr != nil {
+					log.Printf("Error finalizing Single Elimination tournament %d after solo match %d: %v", tournamentID, updatedMatch.ID, finalizeErr)
+				}
+			}
+		} else if currentTournament.Format.BracketType == "RoundRobin" { //
+			log.Printf("Handler: RoundRobin solo match %d updated for tournament %d. Auto-finalization after each match is not standard for RoundRobin. Manual or scheduler-based finalization expected.", updatedMatch.ID, tournamentID)
 		}
 	}
 
@@ -355,23 +338,6 @@ func (h *TournamentHandler) UpdateSoloMatchResultHandler(w http.ResponseWriter, 
 	}
 }
 
-// UpdateTeamMatchResultHandler godoc
-// @Summary Обновить результат командного матча
-// @Tags tournaments
-// @Description Обновляет результат (счет и победителя) командного матча. Доступно организатору турнира.
-// @Accept json
-// @Produce json
-// @Param tournamentID path int true "Tournament ID"
-// @Param matchID path int true "Team Match ID"
-// @Param body body services.UpdateMatchResultInput true "Данные результата матча (score, winner_participant_id - может быть null для ничьи)"
-// @Success 200 {object} map[string]interface{} "Результат матча обновлен"
-// @Failure 400 {object} map[string]string "Некорректные ID или данные результата"
-// @Failure 401 {object} map[string]string "Неавторизован"
-// @Failure 403 {object} map[string]string "Нет прав (не организатор) или турнир не активен"
-// @Failure 404 {object} map[string]string "Турнир или матч не найден"
-// @Failure 409 {object} map[string]string "Матч уже завершен или невалидный победитель"
-// @Security BearerAuth
-// @Router /tournaments/{tournamentID}/matches/team/{matchID}/result [patch]
 func (h *TournamentHandler) UpdateTeamMatchResultHandler(w http.ResponseWriter, r *http.Request) {
 	tournamentID, err := getIDFromURL(r, "tournamentID")
 	if err != nil {
@@ -402,11 +368,21 @@ func (h *TournamentHandler) UpdateTeamMatchResultHandler(w http.ResponseWriter, 
 		return
 	}
 
-	if updatedMatch.NextMatchDBID == nil && updatedMatch.WinnerParticipantID != nil {
-		log.Printf("Handler: Final team match %d completed for tournament %d. Attempting to finalize tournament.", updatedMatch.ID, tournamentID)
-		_, finalizeErr := h.tournamentService.FinalizeTournament(r.Context(), tournamentID, updatedMatch.WinnerParticipantID, currentUserID)
-		if finalizeErr != nil {
-			log.Printf("Error finalizing tournament %d after match %d: %v", tournamentID, updatedMatch.ID, finalizeErr)
+	currentTournament, tErr := h.tournamentService.GetTournamentByID(r.Context(), tournamentID, 0)
+
+	if tErr != nil {
+		log.Printf("Handler: Could not fetch tournament %d details to check format for finalization after team match update: %v", tournamentID, tErr)
+	} else if currentTournament != nil && currentTournament.Format != nil {
+		if currentTournament.Format.BracketType == "SingleElimination" { //
+			if updatedMatch.NextMatchDBID == nil && updatedMatch.WinnerParticipantID != nil {
+				log.Printf("Handler: Final Single Elimination team match %d completed for tournament %d. Attempting to finalize tournament.", updatedMatch.ID, tournamentID)
+				_, finalizeErr := h.tournamentService.FinalizeTournament(r.Context(), tournamentID, updatedMatch.WinnerParticipantID, currentUserID)
+				if finalizeErr != nil {
+					log.Printf("Error finalizing Single Elimination tournament %d after team match %d: %v", tournamentID, updatedMatch.ID, finalizeErr)
+				}
+			}
+		} else if currentTournament.Format.BracketType == "RoundRobin" { //
+			log.Printf("Handler: RoundRobin team match %d updated for tournament %d. Auto-finalization after each match is not standard for RoundRobin. Manual or scheduler-based finalization expected.", updatedMatch.ID, tournamentID)
 		}
 	}
 
@@ -415,17 +391,6 @@ func (h *TournamentHandler) UpdateTeamMatchResultHandler(w http.ResponseWriter, 
 	}
 }
 
-// GetTournamentBracketHandler godoc
-// @Summary Получить данные сетки/таблицы турнира
-// @Tags tournaments
-// @Description Возвращает полную структуру сетки (для SingleElimination) или список матчей и турнирную таблицу (для RoundRobin).
-// @Produce json
-// @Param tournamentID path int true "Tournament ID"
-// @Success 200 {object} services.FullTournamentBracketView "Данные сетки/таблицы турнира"
-// @Failure 400 {object} map[string]string "Некорректный ID"
-// @Failure 404 {object} map[string]string "Турнир или его формат не найден"
-// @Failure 500 {object} map[string]string "Внутренняя ошибка сервера"
-// @Router /tournaments/{tournamentID}/bracket [get]
 func (h *TournamentHandler) GetTournamentBracketHandler(w http.ResponseWriter, r *http.Request) {
 	tournamentID, err := getIDFromURL(r, "tournamentID")
 	if err != nil {
@@ -438,9 +403,6 @@ func (h *TournamentHandler) GetTournamentBracketHandler(w http.ResponseWriter, r
 		mapServiceErrorToHTTP(w, r, err)
 		return
 	}
-	// Для отладки можно вывести, что именно отправляется
-	// responseBytes, _ := json.MarshalIndent(bracketData, "", "  ")
-	// log.Printf("GetTournamentBracketHandler response: %s", string(responseBytes))
 
 	if err := writeJSON(w, http.StatusOK, bracketData, nil); err != nil {
 		serverErrorResponse(w, r, err)
