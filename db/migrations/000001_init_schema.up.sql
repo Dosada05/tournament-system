@@ -252,7 +252,6 @@ DO $$
         END IF;
         IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name='formats' AND column_name='participant_type') THEN
             ALTER TABLE formats ADD COLUMN participant_type VARCHAR(10) NOT NULL DEFAULT 'solo';
-            -- Добавляем CHECK constraint после добавления колонки, если его еще нет
             IF NOT EXISTS (SELECT 1 FROM information_schema.constraint_column_usage WHERE table_name='formats' AND constraint_name='chk_format_participant_type') THEN
                 ALTER TABLE formats ADD CONSTRAINT chk_format_participant_type CHECK (participant_type IN ('solo', 'team'));
             END IF;

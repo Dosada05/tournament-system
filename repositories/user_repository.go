@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/Dosada05/tournament-system/models"
 	"github.com/lib/pq"
@@ -26,6 +27,8 @@ type UserRepository interface {
 	UpdateLogoKey(ctx context.Context, userID int, logoKey string) error
 	Delete(ctx context.Context, id int) error
 	ListByTeamID(ctx context.Context, teamID int) ([]models.User, error)
+	List(ctx context.Context, filter models.UserFilter) ([]models.User, int, error)
+	Count(ctx context.Context, filters map[string]interface{}) (int, error)
 }
 
 type postgresUserRepository struct {
@@ -267,4 +270,85 @@ func mapPQError(err error) error {
 		}
 	}
 	return err
+}
+
+func (r *postgresUserRepository) List(ctx context.Context, filter models.UserFilter) ([]models.User, int, error) {
+	var (
+		users      []models.User
+		args       []interface{}
+		whereParts []string
+		idx        = 1
+	)
+
+	query := `SELECT id, first_name, last_name, nickname, email, role, team_id, password_hash, created_at FROM users`
+	countQuery := `SELECT count(*) FROM users`
+
+	if filter.Search != "" {
+		whereParts = append(whereParts,
+			fmt.Sprintf("(LOWER(first_name) LIKE LOWER('%%' || $%d || '%%') OR LOWER(last_name) LIKE LOWER('%%' || $%d || '%%') OR LOWER(email) LIKE LOWER('%%' || $%d || '%%') OR LOWER(nickname) LIKE LOWER('%%' || $%d || '%%'))", idx, idx, idx, idx))
+		args = append(args, filter.Search)
+		idx++
+	}
+	if filter.Role != nil {
+		whereParts = append(whereParts, fmt.Sprintf("role = $%d", idx))
+		args = append(args, *filter.Role)
+		idx++
+	}
+	if filter.Status != nil {
+		whereParts = append(whereParts, fmt.Sprintf("status = $%d", idx))
+		args = append(args, *filter.Status)
+		idx++
+	}
+	if len(whereParts) > 0 {
+		query += " WHERE " + strings.Join(whereParts, " AND ")
+		countQuery += " WHERE " + strings.Join(whereParts, " AND ")
+	}
+
+	query += " ORDER BY id DESC"
+	if filter.Limit == 0 {
+		filter.Limit = 20
+	}
+	if filter.Page == 0 {
+		filter.Page = 1
+	}
+	offset := (filter.Page - 1) * filter.Limit
+	query += fmt.Sprintf(" LIMIT %d OFFSET %d", filter.Limit, offset)
+
+	rows, err := r.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var u models.User
+		if err := rows.Scan(&u.ID, &u.FirstName, &u.LastName, &u.Nickname, &u.Email, &u.Role, &u.TeamID, &u.PasswordHash, &u.CreatedAt); err != nil {
+			return nil, 0, err
+		}
+		users = append(users, u)
+	}
+
+	var totalCount int
+	err = r.db.QueryRowContext(ctx, countQuery, args...).Scan(&totalCount)
+	if err != nil {
+		return nil, 0, err
+	}
+	return users, totalCount, nil
+}
+
+func (r *postgresUserRepository) Count(ctx context.Context, filters map[string]interface{}) (int, error) {
+	query := "SELECT COUNT(*) FROM users"
+	var args []interface{}
+	var where []string
+	i := 1
+	for k, v := range filters {
+		where = append(where, fmt.Sprintf("%s = $%d", k, i))
+		args = append(args, v)
+		i++
+	}
+	if len(where) > 0 {
+		query += " WHERE " + strings.Join(where, " AND ")
+	}
+	var count int
+	err := r.db.QueryRowContext(ctx, query, args...).Scan(&count)
+	return count, err
 }

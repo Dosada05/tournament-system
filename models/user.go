@@ -26,8 +26,22 @@ type User struct {
 	Team *Team `json:"team,omitempty" db:"-"`
 }
 
-// Credentials используется для передачи данных аутентификации (логин/пароль).
 type Credentials struct {
 	Email    string `json:"email" validate:"required,email"`
 	Password string `json:"password" validate:"required"`
+}
+
+type UserFilter struct {
+	Search string
+	Role   *string
+	Status *string
+	Page   int
+	Limit  int
+}
+
+type UserListResponse struct {
+	Users      []User `json:"users"`
+	TotalCount int    `json:"totalCount"`
+	Page       int    `json:"page"`
+	Limit      int    `json:"limit"`
 }

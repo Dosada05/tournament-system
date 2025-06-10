@@ -32,6 +32,7 @@ type SoloMatchRepository interface {
 	Delete(ctx context.Context, id int) error
 	UpdateNextMatchInfo(ctx context.Context, exec SQLExecutor, matchID int, nextMatchDBID *int, winnerToSlot *int) error
 	UpdateParticipants(ctx context.Context, exec SQLExecutor, matchID int, p1ParticipantID *int, p2ParticipantID *int) error
+	CountSoloMatches(ctx context.Context, filters map[string]interface{}) (int, error)
 }
 
 type postgresSoloMatchRepository struct {
@@ -234,4 +235,22 @@ func (r *postgresSoloMatchRepository) checkAffectedRows(result sql.Result, notFo
 		return notFoundError
 	}
 	return nil
+}
+
+func (r *postgresSoloMatchRepository) CountSoloMatches(ctx context.Context, filters map[string]interface{}) (int, error) {
+	query := "SELECT COUNT(*) FROM solo_matches"
+	var args []interface{}
+	var where []string
+	i := 1
+	for k, v := range filters {
+		where = append(where, fmt.Sprintf("%s = $%d", k, i))
+		args = append(args, v)
+		i++
+	}
+	if len(where) > 0 {
+		query += " WHERE " + strings.Join(where, " AND ")
+	}
+	var count int
+	err := r.db.QueryRowContext(ctx, query, args...).Scan(&count)
+	return count, err
 }

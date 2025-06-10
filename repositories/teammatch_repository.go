@@ -27,6 +27,7 @@ type TeamMatchRepository interface {
 	Delete(ctx context.Context, id int) error
 	UpdateNextMatchInfo(ctx context.Context, exec SQLExecutor, matchID int, nextMatchDBID *int, winnerToSlot *int) error
 	UpdateParticipants(ctx context.Context, exec SQLExecutor, matchID int, t1ParticipantID *int, t2ParticipantID *int) error
+	CountTeamMatches(ctx context.Context, filters map[string]interface{}) (int, error)
 }
 
 type postgresTeamMatchRepository struct {
@@ -219,4 +220,22 @@ func (r *postgresTeamMatchRepository) handleTeamMatchError(err error) error {
 		}
 	}
 	return err
+}
+
+func (r *postgresTeamMatchRepository) CountTeamMatches(ctx context.Context, filters map[string]interface{}) (int, error) {
+	query := "SELECT COUNT(*) FROM team_matches"
+	var args []interface{}
+	var where []string
+	i := 1
+	for k, v := range filters {
+		where = append(where, fmt.Sprintf("%s = $%d", k, i))
+		args = append(args, v)
+		i++
+	}
+	if len(where) > 0 {
+		query += " WHERE " + strings.Join(where, " AND ")
+	}
+	var count int
+	err := r.db.QueryRowContext(ctx, query, args...).Scan(&count)
+	return count, err
 }
