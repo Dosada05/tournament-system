@@ -222,7 +222,7 @@ func (r *postgresTeamMatchRepository) handleTeamMatchError(err error) error {
 	return err
 }
 
-func (r *postgresTeamMatchRepository) Count(ctx context.Context, filters map[string]interface{}) (int, error) {
+func (r *postgresTeamMatchRepository) CountTeamMatches(ctx context.Context, filters map[string]interface{}) (int, error) {
 	query := "SELECT COUNT(*) FROM team_matches"
 	var args []interface{}
 	var where []string

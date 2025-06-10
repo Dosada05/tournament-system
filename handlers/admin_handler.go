@@ -50,7 +50,7 @@ func (h *AdminUserHandler) DeleteUser(w http.ResponseWriter, r *http.Request) {
 	err = h.adminUserService.DeleteUser(r.Context(), userID)
 	if err != nil {
 		if errors.Is(err, repositories.ErrUserNotFound) {
-			notFoundResponse(w, r, "user not found")
+			notFoundResponse(w, r)
 			return
 		}
 		serverErrorResponse(w, r, err)

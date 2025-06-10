@@ -8,6 +8,7 @@ import (
 
 type AdminUserService interface {
 	ListUsers(ctx context.Context, filter models.UserFilter) (models.UserListResponse, error)
+	DeleteUser(ctx context.Context, userID int) error
 }
 
 type adminUserService struct {
