@@ -4,6 +4,8 @@ WORKDIR /app
 
 COPY go.mod go.sum ./
 
+COPY templates/ templates/
+
 RUN go mod download
 
 COPY . .
@@ -17,6 +19,7 @@ FROM alpine:latest
 WORKDIR /app
 
 COPY --from=builder /app/server /app/server
+COPY --from=builder /app/templates /app/templates
 
 EXPOSE 8080
 
