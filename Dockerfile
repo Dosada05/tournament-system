@@ -23,5 +23,4 @@ COPY --from=builder /app/templates /app/templates
 
 EXPOSE 8080
 
-# Команда для запуска приложения при старте контейнера
 CMD ["/app/server"]

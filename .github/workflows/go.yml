@@ -2,10 +2,10 @@ name: Build and Push Docker Image CI
 
 on:
   push:
-    branches: [ main ] # Запуск при пуше в main
+    branches: [ main ]
     tags:
-      - 'v*.*.*'      # Запуск при создании тегов вида v1.0.0
-  workflow_dispatch:    # Разрешает ручной запуск
+      - 'v*.*.*'
+  workflow_dispatch:
 
 jobs:
   test:
@@ -20,7 +20,7 @@ jobs:
           POSTGRES_PASSWORD: ${{ secrets.TEST_DB_PASSWORD }}
           POSTGRES_DB: ${{ secrets.TEST_DB_NAME }}
         ports:
-          - "5432:5432" # Пробрасываем порт 5432 контейнера на 5432 хоста
+          - "5432:5432"
 
     steps:
       - name: Checkout code
@@ -29,7 +29,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22.3' # ЗАМЕНИ НА СВОЮ АКТУАЛЬНУЮ ВЕРСИЮ GO (должна совпадать с Dockerfile)
+          go-version: '1.23.1'
           cache: true
 
       - name: Install dependencies
@@ -52,24 +52,19 @@ jobs:
           echo "PostgreSQL timed out."
           exit 1
         env:
-          TEST_DB_HOST: localhost # Сервис postgres доступен по localhost для других шагов
-          TEST_DB_PORT: 5432    # Порт, который мы пробросили из сервиса
-          # TEST_DB_USER, TEST_DB_PASSWORD, TEST_DB_NAME используются напрямую из секретов в команде
+          TEST_DB_HOST: localhost
+          TEST_DB_PORT: 5432
 
       - name: Apply DB Schema
         run: PGPASSWORD=${{ secrets.TEST_DB_PASSWORD }} psql -h localhost -U ${{ secrets.TEST_DB_USER }} -d ${{ secrets.TEST_DB_NAME }} -p 5432 -a -f ./db/migrations/000001_init_schema.up.sql
-        # Используем localhost и порт 5432, так как они определены в services и ports
-        # Убедись, что путь ./db/migrations/000001_init_schema.up.sql корректен относительно корня репозитория
 
       - name: Run Go tests
         run: go test -v ./...
         env:
-          # Эти переменные ожидает твой config.Load()
           DATABASE_URL: "postgres://${{ secrets.TEST_DB_USER }}:${{ secrets.TEST_DB_PASSWORD }}@localhost:5432/${{ secrets.TEST_DB_NAME }}?sslmode=disable"
-          JWT_SECRET_KEY: ${{ secrets.TEST_JWT_SECRET_KEY }} # Важно для тестов, если они используют JWT
-          SERVER_PORT: "8081" # Можно использовать другой порт для тестов, если нужно
+          JWT_SECRET_KEY: ${{ secrets.TEST_JWT_SECRET_KEY }}
+          SERVER_PORT: "8081"
 
-          # Переменные для Cloudflare R2 (используй мок-значения или реальные тестовые, если тесты их требуют)
           R2_ACCOUNT_ID: ${{ secrets.TEST_R2_ACCOUNT_ID }}
           R2_ACCESS_KEY_ID: ${{ secrets.TEST_R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.TEST_R2_SECRET_ACCESS_KEY }}
@@ -79,7 +74,7 @@ jobs:
   build-and-push:
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
-    needs: test # Запускается только после успешного завершения тестов
+    needs: test
 
     steps:
       - name: Checkout code
@@ -98,7 +93,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: yernursarzh/tournament-system # ЗАМЕНИ yernursarzh на свой Docker Hub username
+          images: yernursarzh/tournament-system
           tags: |
             # Тег для не-main веток (например, branch-feature-xyz)
             type=ref,event=branch,prefix=branch-,enable=${{ github.ref_name != 'main' && github.ref_type == 'branch' }}
@@ -113,9 +108,9 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile # Указываем путь к твоему Dockerfile
+          file: ./Dockerfile
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha # Используем кэш GitHub Actions для Docker слоев
+          cache-from: type=gha
           cache-to: type=gha,mode=max
