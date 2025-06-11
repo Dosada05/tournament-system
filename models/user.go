@@ -23,6 +23,12 @@ type User struct {
 	LogoKey      *string   `json:"-" db:"logo_key"`
 	LogoURL      *string   `json:"logo_url,omitempty" db:"-"`
 
+	EmailConfirmed         bool   `json:"email_confirmed" db:"email_confirmed"`
+	EmailConfirmationToken string `json:"-" db:"email_confirmation_token"`
+
+	PasswordResetToken     *string    `json:"-" db:"password_reset_token"`
+	PasswordResetExpiresAt *time.Time `json:"-" db:"password_reset_expires_at"`
+
 	Team *Team `json:"team,omitempty" db:"-"`
 }
 

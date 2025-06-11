@@ -79,6 +79,7 @@ func main() {
 	standingRepo := repositories.NewPostgresTournamentStandingRepository(dbConn)
 	logger.Info("Repositories initialized")
 
+	emailService := services.NewEmailService(cfg)
 	authService := services.NewAuthService(userRepo)
 	userService := services.NewUserService(userRepo, cloudflareUploader)
 	sportService := services.NewSportService(sportRepo, userRepo, cloudflareUploader)
@@ -155,7 +156,7 @@ func main() {
 		}
 	}()
 
-	authHandler := handlers.NewAuthHandler(authService, cfg.JWTSecretKey)
+	authHandler := handlers.NewAuthHandler(authService, emailService, cfg.JWTSecretKey)
 	userHandler := handlers.NewUserHandler(userService)
 	teamHandler := handlers.NewTeamHandler(teamService, userService)
 	sportHandler := handlers.NewSportHandler(sportService)

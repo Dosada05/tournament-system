@@ -2,8 +2,10 @@ package services
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
-	"fmt" // Используем для оборачивания ошибок
+	"fmt"
+	"time"
 
 	"github.com/Dosada05/tournament-system/models"
 	"github.com/Dosada05/tournament-system/repositories"
@@ -13,16 +15,16 @@ import (
 var (
 	ErrAuthInvalidCredentials = errors.New("invalid email or password")
 	ErrAuthEmailTaken         = errors.New("email is already taken")
-	// Другие специфичные для сервиса ошибки могут быть добавлены здесь
 )
 
-// AuthService определяет интерфейс для аутентификации пользователей.
 type AuthService interface {
-	Register(ctx context.Context, input RegisterInput) (*models.User, error)
+	Register(ctx context.Context, input RegisterInput) (*models.User, string, error)
 	Login(ctx context.Context, input LoginInput) (*models.User, error)
+	ConfirmEmail(ctx context.Context, token string) error
+	GeneratePasswordResetToken(ctx context.Context, email string) (string, error)
+	ResetPasswordByToken(ctx context.Context, token string, newPassword string) error
 }
 
-// RegisterInput определяет данные, необходимые для регистрации.
 type RegisterInput struct {
 	FirstName string `json:"first_name"`
 	LastName  string `json:"last_name"`
@@ -30,86 +32,135 @@ type RegisterInput struct {
 	Password  string `json:"password"`
 }
 
-// LoginInput определяет данные, необходимые для входа.
 type LoginInput struct {
 	Email    string
 	Password string
 }
 
-// authService реализует AuthService.
 type authService struct {
 	userRepo repositories.UserRepository
-	// passwordHasher // Можно вынести хешер в отдельный интерфейс/структуру для большей гибкости
 }
 
-// NewAuthService создает новый экземпляр AuthService.
 func NewAuthService(userRepo repositories.UserRepository) AuthService {
 	return &authService{
 		userRepo: userRepo,
 	}
 }
 
-// Register регистрирует нового пользователя.
-func (s *authService) Register(ctx context.Context, input RegisterInput) (*models.User, error) {
-	// Валидация входных данных (проверка на пустоту, формат email и т.д.)
-	// обычно выполняется в слое выше (handler) или здесь, если правила сложные.
-	// Для простоты пока опустим.
+func (s *authService) Register(ctx context.Context, input RegisterInput) (*models.User, string, error) {
 
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(input.Password), bcrypt.DefaultCost)
 	if err != nil {
-		// Логирование ошибки здесь может быть полезно
-		return nil, fmt.Errorf("failed to hash password: %w", err)
+		return nil, "", fmt.Errorf("ошибка хеширования пароля: %w", err)
 	}
 
+	confirmationToken := generateRandomToken(32)
+
 	user := &models.User{
-		FirstName:    input.FirstName,
-		LastName:     input.LastName,
-		Email:        input.Email,
-		PasswordHash: string(hashedPassword),
-		Role:         models.RolePlayer,
+		FirstName:              input.FirstName,
+		LastName:               input.LastName,
+		Email:                  input.Email,
+		PasswordHash:           string(hashedPassword),
+		Role:                   models.RolePlayer,
+		EmailConfirmed:         false,
+		EmailConfirmationToken: confirmationToken,
 	}
 
 	err = s.userRepo.Create(ctx, user)
 	if err != nil {
-		if errors.Is(err, repositories.ErrUserEmailConflict) {
-			return nil, ErrAuthEmailTaken // Преобразуем ошибку репозитория в ошибку сервиса
+		if errors.Is(err, ErrAuthEmailTaken) {
+			return nil, "", ErrAuthEmailTaken
 		}
-		// Логирование других ошибок репозитория
-		return nil, fmt.Errorf("failed to register user: %w", err)
+		return nil, "", fmt.Errorf("ошибка создания пользователя: %w", err)
 	}
-
-	// Важно: Не возвращаем хеш пароля наружу после регистрации.
-	// Создаем копию или обнуляем поле перед возвратом.
-	user.PasswordHash = "" // Очищаем для безопасности
-
-	return user, nil
+	return user, confirmationToken, nil
 }
 
-// Login аутентифицирует пользователя по email и паролю.
 func (s *authService) Login(ctx context.Context, input LoginInput) (*models.User, error) {
 	user, err := s.userRepo.GetByEmail(ctx, input.Email)
 	if err != nil {
 		if errors.Is(err, repositories.ErrUserNotFound) {
-			return nil, ErrAuthInvalidCredentials // Не раскрываем, что именно не так (email или пароль)
+			return nil, ErrAuthInvalidCredentials
 		}
-		// Логирование других ошибок репозитория
 		return nil, fmt.Errorf("failed to find user by email: %w", err)
 	}
 
-	// Сравниваем предоставленный пароль с хешем из базы данных.
 	err = bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(input.Password))
 	if err != nil {
-		// Если ошибка - это bcrypt.ErrMismatchedHashAndPassword, значит пароль неверный.
-		// Любая другая ошибка указывает на проблему с хешем или самим процессом сравнения.
 		if errors.Is(err, bcrypt.ErrMismatchedHashAndPassword) {
 			return nil, ErrAuthInvalidCredentials
 		}
-		// Логирование неожиданной ошибки сравнения
 		return nil, fmt.Errorf("failed to compare password hash: %w", err)
 	}
 
-	// Успешный вход. Снова очищаем хеш пароля перед возвратом.
 	user.PasswordHash = ""
 
 	return user, nil
+}
+
+func (s *authService) ConfirmEmail(ctx context.Context, token string) error {
+	user, err := s.userRepo.GetByConfirmationToken(ctx, token)
+	if err != nil {
+		return fmt.Errorf("invalid or expired confirmation token: %w", err)
+	}
+	if user.EmailConfirmed {
+		return fmt.Errorf("email already confirmed")
+	}
+	if err := s.userRepo.ConfirmEmail(ctx, user.ID); err != nil {
+		return fmt.Errorf("failed to confirm email: %w", err)
+	}
+	return nil
+}
+
+func (s *authService) GeneratePasswordResetToken(ctx context.Context, email string) (string, error) {
+	user, err := s.userRepo.GetByEmail(ctx, email)
+	if err != nil {
+		// Не раскрываем, зарегистрирован ли email
+		return "", nil
+	}
+	resetToken := generateRandomToken(32)
+	// Сохраняем токен и время его создания в БД
+	err = s.userRepo.SetPasswordResetToken(ctx, user.ID, resetToken, time.Now().Add(1*time.Hour))
+	if err != nil {
+		return "", err
+	}
+	return resetToken, nil
+}
+
+func (s *authService) ResetPasswordByToken(ctx context.Context, token string, newPassword string) error {
+	user, err := s.userRepo.GetByPasswordResetToken(ctx, token)
+	if err != nil {
+		return errors.New("invalid or expired token")
+	}
+	if user.PasswordResetExpiresAt == nil || user.PasswordResetExpiresAt.Before(time.Now()) {
+		return errors.New("token expired")
+	}
+	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return fmt.Errorf("ошибка хеширования пароля: %w", err)
+	}
+	user.PasswordHash = string(hashedPassword)
+	user.PasswordResetToken = nil
+	user.PasswordResetExpiresAt = nil
+	if err := s.userRepo.Update(ctx, user); err != nil {
+		return fmt.Errorf("ошибка обновления пользователя: %w", err)
+	}
+	return nil
+}
+
+func generateRandomToken(length int) string {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	b := make([]byte, length)
+	randomBytes := make([]byte, length)
+	_, err := rand.Read(randomBytes)
+	if err != nil {
+		for i := range b {
+			b[i] = charset[int(time.Now().UnixNano())%len(charset)]
+		}
+		return string(b)
+	}
+	for i, rb := range randomBytes {
+		b[i] = charset[int(rb)%len(charset)]
+	}
+	return string(b)
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/Dosada05/tournament-system/models"
 	"github.com/lib/pq"
@@ -23,12 +24,16 @@ type UserRepository interface {
 	Create(ctx context.Context, user *models.User) error
 	GetByID(ctx context.Context, id int) (*models.User, error)
 	GetByEmail(ctx context.Context, email string) (*models.User, error)
+	GetByConfirmationToken(ctx context.Context, token string) (*models.User, error)
+	ConfirmEmail(ctx context.Context, userID int) error
 	Update(ctx context.Context, user *models.User) error
 	UpdateLogoKey(ctx context.Context, userID int, logoKey string) error
 	Delete(ctx context.Context, id int) error
 	ListByTeamID(ctx context.Context, teamID int) ([]models.User, error)
 	List(ctx context.Context, filter models.UserFilter) ([]models.User, int, error)
 	Count(ctx context.Context, filters map[string]interface{}) (int, error)
+	SetPasswordResetToken(ctx context.Context, userID int, token string, expiresAt time.Time) error
+	GetByPasswordResetToken(ctx context.Context, token string) (*models.User, error)
 }
 
 type postgresUserRepository struct {
@@ -41,8 +46,8 @@ func NewPostgresUserRepository(db *sql.DB) UserRepository {
 
 func (r *postgresUserRepository) Create(ctx context.Context, user *models.User) error {
 	query := `
-		INSERT INTO users (first_name, last_name, nickname, email, password_hash, role, team_id, logo_key)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO users (first_name, last_name, nickname, email, password_hash, role, team_id, logo_key, email_confirmed, email_confirmation_token)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING id, created_at`
 	err := r.db.QueryRowContext(ctx, query,
 		user.FirstName,
@@ -53,9 +58,16 @@ func (r *postgresUserRepository) Create(ctx context.Context, user *models.User) 
 		user.Role,
 		user.TeamID,
 		user.LogoKey,
+		user.EmailConfirmed,
+		user.EmailConfirmationToken,
 	).Scan(&user.ID, &user.CreatedAt)
 	if err != nil {
-		return mapPQError(err)
+		if pqErr, ok := err.(*pq.Error); ok {
+			if pqErr.Code == "23505" && strings.Contains(pqErr.Message, "email") {
+				return ErrUserEmailConflict
+			}
+		}
+		return err
 	}
 	return nil
 }
@@ -119,10 +131,31 @@ func (r *postgresUserRepository) GetByID(ctx context.Context, id int) (*models.U
 
 func (r *postgresUserRepository) GetByEmail(ctx context.Context, email string) (*models.User, error) {
 	query := `
-		SELECT id, first_name, last_name, nickname, email, password_hash, role, team_id, logo_key, created_at
+		SELECT id, first_name, last_name, nickname, email, password_hash, role, team_id, logo_key, created_at, email_confirmed, email_confirmation_token
 		FROM users
 		WHERE email = $1`
 	return scanUserRow(ctx, r.db, query, email)
+}
+
+func (r *postgresUserRepository) GetByConfirmationToken(ctx context.Context, token string) (*models.User, error) {
+	query := `SELECT id, first_name, last_name, nickname, email, password_hash, role, team_id, logo_key, created_at, email_confirmed, email_confirmation_token FROM users WHERE email_confirmation_token = $1`
+	return scanUserRow(ctx, r.db, query, token)
+}
+
+func (r *postgresUserRepository) ConfirmEmail(ctx context.Context, userID int) error {
+	query := `UPDATE users SET email_confirmed = TRUE, email_confirmation_token = NULL WHERE id = $1`
+	result, err := r.db.ExecContext(ctx, query, userID)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrUserNotFound
+	}
+	return nil
 }
 
 func (r *postgresUserRepository) Update(ctx context.Context, user *models.User) error {
@@ -135,8 +168,10 @@ func (r *postgresUserRepository) Update(ctx context.Context, user *models.User) 
 			password_hash = $5,
 			role = $6,
 			team_id = $7,
-			logo_key = $8
-		WHERE id = $9`
+			logo_key = $8,
+			email_confirmed = $9,
+			email_confirmation_token = $10
+		WHERE id = $11`
 	result, err := r.db.ExecContext(ctx, query,
 		user.FirstName,
 		user.LastName,
@@ -146,6 +181,8 @@ func (r *postgresUserRepository) Update(ctx context.Context, user *models.User) 
 		user.Role,
 		user.TeamID,
 		user.LogoKey,
+		user.EmailConfirmed,
+		user.EmailConfirmationToken,
 		user.ID,
 	)
 	if err != nil {
@@ -243,12 +280,56 @@ func scanUserRow(ctx context.Context, db *sql.DB, query string, args ...interfac
 		&user.TeamID,
 		&user.LogoKey,
 		&user.CreatedAt,
+		&user.EmailConfirmed,
+		&user.EmailConfirmationToken,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrUserNotFound
 		}
 		return nil, err
+	}
+	return user, nil
+}
+
+func (r *postgresUserRepository) GetByPasswordResetToken(ctx context.Context, token string) (*models.User, error) {
+	query := `SELECT id, first_name, last_name, nickname, email, password_hash, role, team_id, logo_key, created_at, email_confirmed, email_confirmation_token, password_reset_token, password_reset_expires_at FROM users WHERE password_reset_token = $1`
+	return scanUserRowWithReset(ctx, r.db, query, token)
+}
+
+func scanUserRowWithReset(ctx context.Context, db *sql.DB, query string, args ...interface{}) (*models.User, error) {
+	user := &models.User{}
+	var (
+		passwordResetToken     sql.NullString
+		passwordResetExpiresAt sql.NullTime
+	)
+	err := db.QueryRowContext(ctx, query, args...).Scan(
+		&user.ID,
+		&user.FirstName,
+		&user.LastName,
+		&user.Nickname,
+		&user.Email,
+		&user.PasswordHash,
+		&user.Role,
+		&user.TeamID,
+		&user.LogoKey,
+		&user.CreatedAt,
+		&user.EmailConfirmed,
+		&user.EmailConfirmationToken,
+		&passwordResetToken,
+		&passwordResetExpiresAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrUserNotFound
+		}
+		return nil, err
+	}
+	if passwordResetToken.Valid {
+		user.PasswordResetToken = &passwordResetToken.String
+	}
+	if passwordResetExpiresAt.Valid {
+		user.PasswordResetExpiresAt = &passwordResetExpiresAt.Time
 	}
 	return user, nil
 }
@@ -351,4 +432,20 @@ func (r *postgresUserRepository) Count(ctx context.Context, filters map[string]i
 	var count int
 	err := r.db.QueryRowContext(ctx, query, args...).Scan(&count)
 	return count, err
+}
+
+func (r *postgresUserRepository) SetPasswordResetToken(ctx context.Context, userID int, token string, expiresAt time.Time) error {
+	query := `UPDATE users SET password_reset_token = $1, password_reset_expires_at = $2 WHERE id = $3`
+	result, err := r.db.ExecContext(ctx, query, token, expiresAt, userID)
+	if err != nil {
+		return err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return ErrUserNotFound
+	}
+	return nil
 }

@@ -13,18 +13,19 @@ import (
 )
 
 type AuthHandler struct {
-	authService services.AuthService
-	jwtSecret   []byte
+	authService  services.AuthService
+	emailService *services.EmailService
+	jwtSecret    []byte
 }
 
-func NewAuthHandler(auth services.AuthService, jwtSecret string) *AuthHandler {
+func NewAuthHandler(authService services.AuthService, emailService *services.EmailService, jwtSecret string) *AuthHandler {
 	return &AuthHandler{
-		authService: auth,
-		jwtSecret:   []byte(jwtSecret),
+		authService:  authService,
+		emailService: emailService,
+		jwtSecret:    []byte(jwtSecret),
 	}
 }
 
-// Register обрабатывает запрос на регистрацию нового пользователя.
 func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	var input services.RegisterInput
@@ -40,12 +41,15 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := h.authService.Register(r.Context(), input)
+	user, confirmationToken, err := h.authService.Register(r.Context(), input)
 	if err != nil {
 		mapServiceErrorToHTTP(w, r, err)
 		return
 	}
 
+	if err := h.emailService.SendWelcomeEmail(user.Email, confirmationToken); err != nil {
+		fmt.Println("Ошибка отправки email:", err)
+	}
 	response := jsonResponse{
 		"user": user,
 	}
@@ -77,11 +81,11 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	}
 
 	claims := jwt.MapClaims{
-		"user_id": user.ID,                               // Subject (идентификатор пользователя)
-		"role":    user.Role,                             // Роль пользователя
-		"name":    user.Nickname,                         // Имя пользователя (или другое)
-		"exp":     time.Now().Add(time.Hour * 72).Unix(), // Срок действия токена (например, 72 часа)
-		"iat":     time.Now().Unix(),                     // Время создания токена
+		"user_id": user.ID,
+		"role":    user.Role,
+		"name":    user.Nickname,
+		"exp":     time.Now().Add(time.Hour * 24).Unix(),
+		"iat":     time.Now().Unix(),
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -98,6 +102,74 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 
 	err = writeJSON(w, http.StatusOK, response, nil)
 	if err != nil {
+		serverErrorResponse(w, r, err)
+	}
+}
+
+func (h *AuthHandler) ConfirmEmail(w http.ResponseWriter, r *http.Request) {
+	token := r.URL.Query().Get("token")
+	if token == "" {
+		badRequestResponse(w, r, errors.New("confirmation token is required"))
+		return
+	}
+
+	err := h.authService.ConfirmEmail(r.Context(), token)
+	if err != nil {
+		mapServiceErrorToHTTP(w, r, err)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Email успешно подтвержден!"))
+}
+
+// Запрос на сброс пароля
+func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Email string `json:"email"`
+	}
+	if err := readJSON(w, r, &input); err != nil {
+		badRequestResponse(w, r, err)
+		return
+	}
+	if input.Email == "" {
+		badRequestResponse(w, r, errors.New("email is required"))
+		return
+	}
+	resetToken, err := h.authService.GeneratePasswordResetToken(r.Context(), input.Email)
+	if err != nil {
+		mapServiceErrorToHTTP(w, r, err)
+		return
+	}
+	if err := h.emailService.SendPasswordResetEmail(input.Email, resetToken); err != nil {
+		fmt.Println("Ошибка отправки email для сброса пароля:", err)
+	}
+	response := map[string]string{"message": "Если email зарегистрирован, ссылка для сброса отправлена"}
+	if err := writeJSON(w, http.StatusOK, response, nil); err != nil {
+		serverErrorResponse(w, r, err)
+	}
+}
+
+// Сброс пароля по токену
+func (h *AuthHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Token       string `json:"token"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := readJSON(w, r, &input); err != nil {
+		badRequestResponse(w, r, err)
+		return
+	}
+	if input.Token == "" || input.NewPassword == "" {
+		badRequestResponse(w, r, errors.New("token and new_password are required"))
+		return
+	}
+	if err := h.authService.ResetPasswordByToken(r.Context(), input.Token, input.NewPassword); err != nil {
+		mapServiceErrorToHTTP(w, r, err)
+		return
+	}
+	response := map[string]string{"message": "Пароль успешно изменён"}
+	if err := writeJSON(w, http.StatusOK, response, nil); err != nil {
 		serverErrorResponse(w, r, err)
 	}
 }

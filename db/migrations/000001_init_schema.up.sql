@@ -41,7 +41,9 @@ CREATE TABLE users (
                        role user_role NOT NULL,
                        email VARCHAR(100) UNIQUE NOT NULL,
                        password_hash VARCHAR(255) NOT NULL,
-                       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+                       created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                       email_confirmed BOOLEAN NOT NULL DEFAULT FALSE,
+                       email_confirmation_token VARCHAR(255)
 );
 
 ALTER TABLE users ADD CONSTRAINT fk_users_team FOREIGN KEY (team_id) REFERENCES teams (id) ON DELETE SET NULL;
@@ -281,5 +283,3 @@ ALTER TABLE tournaments
     ADD CONSTRAINT fk_tournaments_overall_winner FOREIGN KEY (overall_winner_participant_id) REFERENCES participants(id) ON DELETE SET NULL;
 
 CREATE INDEX idx_tournaments_overall_winner_participant_id ON tournaments (overall_winner_participant_id);
-
-

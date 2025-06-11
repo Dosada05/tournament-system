@@ -28,15 +28,16 @@ func SetupRoutes(
 	router.Use(chiMiddleware.RequestID)
 	router.Use(chiMiddleware.RealIP)
 
-	// --- Маршруты Auth ---
-	router.Route("/auth", func(r chi.Router) { // Изменил с /users на /auth для ясности
+	router.Route("/auth", func(r chi.Router) {
 		r.Post("/signup", authHandler.Register)
 		r.Post("/signin", authHandler.Login)
+
+		r.Post("/forgot-password", authHandler.ForgotPassword)
+		r.Post("/reset-password", authHandler.ResetPassword)
 	})
 
-	// --- Маршруты Users ---
 	router.Route("/users", func(r chi.Router) {
-		r.Get("/{id}", userHandler.GetUserByID) // Публичный профиль
+		r.Get("/{id}", userHandler.GetUserByID)
 
 		r.Group(func(authRouter chi.Router) {
 			authRouter.Use(middleware.Authenticate)
@@ -45,7 +46,6 @@ func SetupRoutes(
 		})
 	})
 
-	// --- Маршруты Teams ---
 	router.Route("/teams", func(r chi.Router) {
 		r.Get("/{teamID}", teamHandler.GetTeamByID)
 		r.Get("/{teamID}/members", teamHandler.ListTeamMembers)
@@ -58,7 +58,6 @@ func SetupRoutes(
 			authRouter.Delete("/{teamID}/members/{userID}", teamHandler.RemoveMember)
 			authRouter.Post("/{teamID}/logo", teamHandler.UploadTeamLogo)
 
-			// Маршруты для инвайтов в команду
 			authRouter.Route("/{teamID}/invites", func(inviteRouter chi.Router) {
 				inviteRouter.Post("/", inviteHandler.CreateOrRenewInviteHandler)
 				inviteRouter.Get("/", inviteHandler.GetTeamInviteHandler)
@@ -66,17 +65,15 @@ func SetupRoutes(
 			})
 		})
 	})
-	// Маршрут для присоединения к команде по токену (аутентифицированный пользователь)
 	router.With(middleware.Authenticate).Post("/invites/join/{token}", inviteHandler.JoinTeamHandler)
 
-	// --- Маршруты Sports ---
 	router.Route("/sports", func(r chi.Router) {
 		r.Get("/", sportHandler.GetAllSports)
 		r.Get("/{sportID}", sportHandler.GetSportByID)
 
 		r.Group(func(adminRouter chi.Router) {
 			adminRouter.Use(middleware.Authenticate)
-			adminRouter.Use(middleware.Authorize(models.RoleAdmin)) // Только админ может управлять видами спорта
+			adminRouter.Use(middleware.Authorize(models.RoleAdmin))
 			adminRouter.Post("/", sportHandler.CreateSport)
 			adminRouter.Put("/{sportID}", sportHandler.UpdateSport)
 			adminRouter.Delete("/{sportID}", sportHandler.DeleteSport)
@@ -85,11 +82,9 @@ func SetupRoutes(
 	})
 
 	router.Route("/formats", func(r chi.Router) {
-		// Публичные маршруты для форматов (если нужны)
-		r.Get("/", formatHandler.GetAllFormats)           // Список всех форматов
-		r.Get("/{formatID}", formatHandler.GetFormatByID) // Получение формата по ID
+		r.Get("/", formatHandler.GetAllFormats)
+		r.Get("/{formatID}", formatHandler.GetFormatByID)
 
-		// Маршруты, требующие аутентификации и прав администратора
 		r.Group(func(adminRouter chi.Router) {
 			adminRouter.Use(middleware.Authenticate)
 			adminRouter.Use(middleware.Authorize(models.RoleAdmin))
@@ -99,7 +94,6 @@ func SetupRoutes(
 		})
 	})
 
-	// --- Маршруты Tournaments ---
 	router.Route("/tournaments", func(r chi.Router) {
 		r.Get("/", tournamentHandler.ListHandler)
 		r.Get("/{tournamentID}", tournamentHandler.GetByIDHandler)
@@ -125,7 +119,6 @@ func SetupRoutes(
 		})
 	})
 
-	// --- Маршруты Participants (управление заявками) ---
 	router.Route("/participants/{participantID}", func(r chi.Router) {
 		r.Use(middleware.Authenticate)
 		r.Delete("/cancel", participantHandler.CancelRegistration)
@@ -145,4 +138,5 @@ func SetupRoutes(
 		})
 	})
 
+	router.Get("/confirm-email", authHandler.ConfirmEmail)
 }

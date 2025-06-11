@@ -17,6 +17,13 @@ type Config struct {
 	R2SecretAccessKey string
 	R2BucketName      string
 	R2PublicBaseURL   string
+	PublicURL         string
+
+	SMTPHost string
+	SMTPPort int
+	SMTPUser string
+	SMTPPass string
+	SMTPFrom string
 }
 
 func Load() (*Config, error) {
@@ -65,6 +72,40 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("R2_PUBLIC_BASE_URL environment variable is not set")
 	}
 
+	publicURL := os.Getenv("PUBLIC_URL")
+	if publicURL == "" {
+		return nil, fmt.Errorf("PUBLIC_URL environment variable is not set")
+	}
+
+	// SMTP config
+	smtpHost := os.Getenv("SMTP_HOST")
+	if smtpHost == "" {
+		return nil, fmt.Errorf("SMTP_HOST environment variable is not set")
+	}
+	smtpPortStr := os.Getenv("SMTP_PORT")
+	if smtpPortStr == "" {
+		smtpPortStr = "587"
+	}
+	smtpPort, err := strconv.Atoi(smtpPortStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid SMTP_PORT environment variable: %w", err)
+	}
+	if smtpPort <= 0 || smtpPort > 65535 {
+		return nil, fmt.Errorf("SMTP_PORT must be between 1 and 65535, got %d", smtpPort)
+	}
+	smtpUser := os.Getenv("SMTP_USER")
+	if smtpUser == "" {
+		return nil, fmt.Errorf("SMTP_USER environment variable is not set")
+	}
+	smtpPass := os.Getenv("SMTP_PASS")
+	if smtpPass == "" {
+		return nil, fmt.Errorf("SMTP_PASS environment variable is not set")
+	}
+	smtpFrom := os.Getenv("SMTP_FROM")
+	if smtpFrom == "" {
+		return nil, fmt.Errorf("SMTP_FROM environment variable is not set")
+	}
+
 	cfg := &Config{
 		DatabaseURL:       dbURL,
 		JWTSecretKey:      jwtKey,
@@ -74,6 +115,13 @@ func Load() (*Config, error) {
 		R2SecretAccessKey: r2SecretAccessKey,
 		R2BucketName:      r2BucketName,
 		R2PublicBaseURL:   r2PublicBaseURL,
+		PublicURL:         publicURL,
+
+		SMTPHost: smtpHost,
+		SMTPPort: smtpPort,
+		SMTPUser: smtpUser,
+		SMTPPass: smtpPass,
+		SMTPFrom: smtpFrom,
 	}
 
 	return cfg, nil
