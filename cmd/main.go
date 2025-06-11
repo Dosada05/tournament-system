@@ -184,7 +184,7 @@ func main() {
 		dashboardHandler,
 	)
 	corsHandler := cors.New(cors.Options{
-		AllowedOrigins:   []string{"https://tournament-frontend-fgm0.onrender.com", "http://localhost:5173"},
+		AllowedOrigins:   []string{"https://tournament-frontend-fgm0.onrender.com", "http://localhost:5173", "https://heartbit.live", "https://www.heartbit.live"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"*"},
 		AllowCredentials: true,
