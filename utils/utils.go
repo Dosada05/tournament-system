@@ -1,7 +1,6 @@
 package utils
 
 import (
-	"golang.org/x/crypto/bcrypt"
 	"os"
 )
 
@@ -20,16 +19,6 @@ func getEnvOrDefault(key, defaultValue string) string {
 		return value
 	}
 	return defaultValue
-}
-
-func HashPassword(password string) (string, error) {
-	bytes, err := bcrypt.GenerateFromPassword([]byte(password), BcryptCost)
-	return string(bytes), err
-}
-
-func CheckPasswordHash(password, hash string) bool {
-	err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password))
-	return err == nil
 }
 
 func IsValidEmail(email string) bool {

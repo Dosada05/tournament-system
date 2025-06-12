@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/Dosada05/tournament-system/models"
@@ -130,6 +131,7 @@ func (s *authService) GeneratePasswordResetToken(ctx context.Context, email stri
 func (s *authService) ResetPasswordByToken(ctx context.Context, token string, newPassword string) error {
 	user, err := s.userRepo.GetByPasswordResetToken(ctx, token)
 	if err != nil {
+		log.Printf("Error getting user by password reset token: %v", err)
 		return errors.New("invalid or expired token")
 	}
 	if user.PasswordResetExpiresAt == nil || user.PasswordResetExpiresAt.Before(time.Now()) {

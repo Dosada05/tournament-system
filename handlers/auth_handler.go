@@ -150,7 +150,6 @@ func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// Сброс пароля по токену
 func (h *AuthHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Token       string `json:"token"`
