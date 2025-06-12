@@ -162,7 +162,7 @@ func main() {
 	sportHandler := handlers.NewSportHandler(sportService)
 	formatHandler := handlers.NewFormatHandler(formatService)
 	tournamentHandler := handlers.NewTournamentHandler(tournamentService, matchService)
-	inviteHandler := handlers.NewInviteHandler(inviteService)
+	inviteHandler := handlers.NewInviteHandler(inviteService, emailService, cfg.PublicURL)
 	participantHandler := handlers.NewParticipantHandler(participantService)
 	webSocketHandler := handlers.NewWebSocketHandler(wsHub)
 	adminHandler := handlers.NewAdminUserHandler(adminService)

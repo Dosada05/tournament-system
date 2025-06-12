@@ -32,6 +32,7 @@ type InviteService interface {
 	ValidateAndJoinTeam(ctx context.Context, token string, joiningUserID int) (*models.Team, error)
 	GetTeamInvite(ctx context.Context, teamID int, currentUserID int) (*models.Invite, error)
 	RevokeInvite(ctx context.Context, teamID int, currentUserID int) error
+	GetTeamByID(ctx context.Context, teamID int) (*models.Team, error)
 }
 
 type inviteService struct {
@@ -196,6 +197,10 @@ func (s *inviteService) RevokeInvite(ctx context.Context, teamID int, currentUse
 	}
 
 	return nil
+}
+
+func (s *inviteService) GetTeamByID(ctx context.Context, teamID int) (*models.Team, error) {
+	return s.teamRepo.GetByID(ctx, teamID)
 }
 
 func generateSecureToken(byteLength int) (string, error) {

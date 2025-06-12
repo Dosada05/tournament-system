@@ -131,14 +131,14 @@ func (r *postgresUserRepository) GetByID(ctx context.Context, id int) (*models.U
 
 func (r *postgresUserRepository) GetByEmail(ctx context.Context, email string) (*models.User, error) {
 	query := `
-		SELECT id, first_name, last_name, nickname, email, password_hash, role, team_id, logo_key, created_at, email_confirmed, email_confirmation_token
-		FROM users
-		WHERE email = $1`
+  SELECT id, first_name, last_name, nickname, email, password_hash, role, team_id, logo_key, created_at, email_confirmed
+  FROM users
+  WHERE email = $1`
 	return scanUserRow(ctx, r.db, query, email)
 }
 
 func (r *postgresUserRepository) GetByConfirmationToken(ctx context.Context, token string) (*models.User, error) {
-	query := `SELECT id, first_name, last_name, nickname, email, password_hash, role, team_id, logo_key, created_at, email_confirmed, email_confirmation_token FROM users WHERE email_confirmation_token = $1`
+	query := `SELECT id, first_name, last_name, nickname, email, password_hash, role, team_id, logo_key, created_at, email_confirmed FROM users WHERE email_confirmation_token = $1`
 	return scanUserRow(ctx, r.db, query, token)
 }
 
@@ -281,7 +281,6 @@ func scanUserRow(ctx context.Context, db *sql.DB, query string, args ...interfac
 		&user.LogoKey,
 		&user.CreatedAt,
 		&user.EmailConfirmed,
-		&user.EmailConfirmationToken,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {

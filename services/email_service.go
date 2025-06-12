@@ -131,7 +131,7 @@ func (s *EmailService) SendWelcomeEmail(userEmail string, confirmationToken stri
 }
 
 func (s *EmailService) SendPasswordResetEmail(userEmail string, resetToken string) error {
-	subject := "Сброс пароля для Tournament System"
+	subject := "Сброс пароля для Heartbit"
 	resetLink := fmt.Sprintf("%s/reset-password?token=%s", s.cfg.PublicURL, resetToken)
 	templateData := struct {
 		Email     string
@@ -147,4 +147,47 @@ func (s *EmailService) SendPasswordResetEmail(userEmail string, resetToken strin
 	}
 
 	return s.SendEmail([]string{userEmail}, subject, htmlBody)
+}
+
+func (s *EmailService) SendTeamInviteEmail(userEmail, teamName, inviteLink string) error {
+	subject := fmt.Sprintf("Приглашение в команду %s", teamName)
+	data := struct {
+		TeamName   string
+		InviteLink string
+	}{
+		TeamName:   teamName,
+		InviteLink: inviteLink,
+	}
+	htmlBody, err := s.GenerateEmailBody("templates/emails/team_invite_email.html", data)
+	if err != nil {
+		return fmt.Errorf("ошибка генерации тела письма-приглашения: %w", err)
+	}
+	return s.SendEmail([]string{userEmail}, subject, htmlBody)
+}
+
+func (s *EmailService) SendTournamentStatusEmail(userEmail, tournamentName, status, link string) error {
+	subject := fmt.Sprintf("Турнир '%s': %s", tournamentName, status)
+	data := struct {
+		TournamentName string
+		Status         string
+		Link           string
+	}{
+		TournamentName: tournamentName,
+		Status:         status,
+		Link:           link,
+	}
+	htmlBody, err := s.GenerateEmailBody("templates/emails/tournament_status_email.html", data)
+	if err != nil {
+		return fmt.Errorf("ошибка генерации тела письма о статусе турнира: %w", err)
+	}
+	return s.SendEmail([]string{userEmail}, subject, htmlBody)
+}
+
+func (s *EmailService) SendSystemNotificationEmail(emails []string, subject, message string) error {
+	for _, email := range emails {
+		if err := s.SendEmail([]string{email}, subject, message); err != nil {
+			return fmt.Errorf("ошибка отправки системного уведомления %s: %w", email, err)
+		}
+	}
+	return nil
 }

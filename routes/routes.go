@@ -63,6 +63,8 @@ func SetupRoutes(
 				inviteRouter.Get("/", inviteHandler.GetTeamInviteHandler)
 				inviteRouter.Delete("/", inviteHandler.RevokeInviteHandler)
 			})
+
+			authRouter.Post("/teams/{teamID}/invite-email", inviteHandler.InviteByEmailHandler)
 		})
 	})
 	router.With(middleware.Authenticate).Post("/invites/join/{token}", inviteHandler.JoinTeamHandler)

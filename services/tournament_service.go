@@ -1197,3 +1197,4 @@ func (s *tournamentService) toMatchView(sm *models.SoloMatch, tm *models.TeamMat
 	}
 	return mv
 }
+
