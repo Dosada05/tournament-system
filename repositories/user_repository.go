@@ -292,7 +292,7 @@ func scanUserRow(ctx context.Context, db *sql.DB, query string, args ...interfac
 }
 
 func (r *postgresUserRepository) GetByPasswordResetToken(ctx context.Context, token string) (*models.User, error) {
-	query := `SELECT id, first_name, last_name, nickname, email, password_hash, role, team_id, logo_key, created_at, email_confirmed, email_confirmation_token, password_reset_token, password_reset_expires_at FROM users WHERE password_reset_token = $1`
+	query := `SELECT id, first_name, last_name, nickname, email, password_hash, role, team_id, logo_key, created_at, email_confirmed, password_reset_token, password_reset_expires_at FROM users WHERE password_reset_token = $1`
 	return scanUserRowWithReset(ctx, r.db, query, token)
 }
 
@@ -314,7 +314,6 @@ func scanUserRowWithReset(ctx context.Context, db *sql.DB, query string, args ..
 		&user.LogoKey,
 		&user.CreatedAt,
 		&user.EmailConfirmed,
-		&user.EmailConfirmationToken,
 		&passwordResetToken,
 		&passwordResetExpiresAt,
 	)
